@@ -587,3 +587,53 @@ func (j *cookieJar) Cookies(*url.URL) []*http.Cookie {
 	defer j.mu.Unlock()
 	return j.cs
 }
+
+// TestCookiesFile signs in from a cookies file put on the card.
+func TestCookiesFile(t *testing.T) {
+	f := newFakeApple(t)
+	d := rig(t, f)
+	d.signOut()
+	until(t, "signed out", func() bool { return d.authState() == authNoToken })
+	if got := titles(d.menu()); got[1] != "Or put cookies.txt on the card" {
+		t.Fatalf("menu %q", got)
+	}
+	line := func(tok string) string {
+		return "# Netscape HTTP Cookie File\n.apple.com\tTRUE\t/\tTRUE\t0\tmyacinfo\tsecret\n" +
+			"#HttpOnly_.music.apple.com\tTRUE\t/\tTRUE\t1800000000\tmedia-user-token\t" + tok + "\n"
+	}
+	accounts := func() int {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return strings.Count(strings.Join(f.asked, "\n"), "/v1/me/account")
+	}
+	// One Apple refuses: it stays, the menu says so, and it isn't asked about again.
+	bad := filepath.Join(q2.Card, "cookies.txt")
+	os.WriteFile(bad, []byte(line(appleToken("q"))), 0o644)
+	d.lookForCookies()
+	if got := titles(d.menu()); got[1] != "The cookies file didn't sign in" || d.authState() != authNoToken {
+		t.Fatalf("menu %q, auth %d", got, d.authState())
+	}
+	n := accounts()
+	d.lookForCookies()
+	if accounts() != n {
+		t.Fatal("a refused cookies file was asked about again")
+	}
+	if _, err := os.Stat(bad); err != nil {
+		t.Fatal("the refused cookies file was deleted")
+	}
+	// A good one, in Apple Music/: signed in, the token saved, the file gone.
+	os.MkdirAll(d.dl.folder, 0o755)
+	good := filepath.Join(d.dl.folder, "cookies-music-apple-com.txt")
+	os.WriteFile(good, []byte(line(f.token)), 0o644)
+	d.lookForCookies()
+	until(t, "the sign-in", func() bool { return d.authState() == authOK })
+	if d.token() != f.token {
+		t.Fatal("the token isn't saved")
+	}
+	if _, err := os.Stat(good); !os.IsNotExist(err) {
+		t.Fatal("the cookies file is still on the card")
+	}
+	if cookieToken([]byte("media-user-token="+f.token)) != f.token || cookieToken([]byte(line("0.short"))) != "" {
+		t.Fatal("cookieToken")
+	}
+}

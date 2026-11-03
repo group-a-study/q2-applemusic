@@ -84,7 +84,12 @@ it leaves.
       Stream mode's songs, none kept past the next session
 
 The media-user-token is the account's sign-in: treat it like a password. One line in
-.applemusic/media-user-token, put there by hand, works too. It lasts months; when Apple refuses it
+.applemusic/media-user-token, put there by hand, works too. So does a cookies file (cookies.go): a
+*cookie*.txt at the card's root, in Apple Music/ or in .applemusic/, looked for at the start and
+every 10 s; its music.apple.com media-user-token (a Netscape cookies.txt line, #HttpOnly_ or not,
+or a Cookie header) is checked with Apple, saved if it signs in with a subscription, and the file
+deleted (a browser's export can hold the Apple ID's myacinfo too). One Apple refuses stays, the
+menu saying why, and is asked about again only once it changes (size or time). It lasts months; when Apple refuses it
 (403 on the account), the page asks to sign in again. Apple not answering at all is told apart from
 a refused token (apple.IsNoNetwork, apple.ErrSignedOut), so a dropped Wi-Fi never asks for a new one.
 A refused developer token (401) is read again from music.apple.com once, then the request retried.

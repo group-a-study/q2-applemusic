@@ -21,6 +21,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -31,7 +32,7 @@ import (
 	"github.com/group-a-study/q2-applemusic/internal/widevine"
 )
 
-const version = "q2-v1.3"
+const version = "q2-v1.4"
 
 // transport carries every request to Apple: TLS checked against the add-on's own roots, as the
 // firmware has none. Tests answer for Apple instead.
@@ -73,6 +74,10 @@ type daemon struct {
 	used time.Time // the Q2's page, last
 	quit chan struct{}
 	once sync.Once
+
+	cookies    map[string]cookieSeen // cookies files looked at (cookies.go)
+	cookieNote string                // why the last one didn't sign in
+	importing  atomic.Bool           // a look for cookies files under way
 }
 
 // signinPort is where the sign-in page listens (the next free one if taken).
@@ -101,7 +106,7 @@ func start(dir, folder, statusFile, browse, control string) *daemon {
 	apple.UseTransport(transport())
 	tlsroots.DateURL = "http://www.apple.com/"
 	d := &daemon{dir: dir, state: &q2.State{Path: statusFile}, cache: newCache(), browse: browse, control: control,
-		used: time.Now(), quit: make(chan struct{})}
+		used: time.Now(), quit: make(chan struct{}), cookies: map[string]cookieSeen{}}
 	// A device of the card's own (.applemusic/device.wvd), should Apple stop taking the built-in one.
 	if b, err := os.ReadFile(filepath.Join(dir, "device.wvd")); err == nil {
 		d.dev, _ = widevine.ParseWVD(b)
@@ -114,7 +119,7 @@ func start(dir, folder, statusFile, browse, control string) *daemon {
 	d.startSignin(signinPort)
 	d.client() // reads the token, if the card has one
 	d.writeState()
-	go d.checkAuth()
+	go func() { d.lookForCookies(); d.checkAuth() }()
 	q2.Control(control, func(cmd []byte) {
 		if len(cmd) > 0 && cmd[0] == 'q' {
 			d.shutdown()
@@ -146,6 +151,9 @@ func (d *daemon) run() {
 			d.writeState()
 			if n%30 == 0 && d.authState() == authOffline {
 				go d.checkAuth()
+			}
+			if n%cookieEvery == 0 {
+				go d.lookForCookies()
 			}
 			d.mu.Lock()
 			idle := time.Since(d.used)
@@ -329,4 +337,12 @@ func plural(n int, one string) string {
 		return "1 " + one
 	}
 	return fmt.Sprintf("%d %ss", n, one)
+}
+
+// lookForCookies signs in from a cookies file on the card (cookies.go), one look at a time.
+func (d *daemon) lookForCookies() {
+	if d.importing.CompareAndSwap(false, true) {
+		defer d.importing.Store(false)
+		d.importCookies()
+	}
 }

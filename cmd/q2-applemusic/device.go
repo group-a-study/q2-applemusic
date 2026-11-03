@@ -870,12 +870,18 @@ func (d *daemon) menu() q2spot.Reply {
 	stop := q2spot.Row{Kind: "action", URI: "stop", Title: "Stop Apple Music", Subtitle: "Downloads carry on next time"}
 	queue := d.queueRow()
 	var rows []q2spot.Row
+	cookies := info("Or put cookies.txt on the card", "music.apple.com's, exported: it signs in by itself")
+	d.mu.Lock()
+	if d.cookieNote != "" {
+		cookies = info("The cookies file didn't sign in", d.cookieNote)
+	}
+	d.mu.Unlock()
 	switch d.authState() {
 	case authNoToken:
-		rows = []q2spot.Row{{Kind: "remote", Title: "Sign In from Your Phone", Subtitle: "Press to show the code"},
+		rows = []q2spot.Row{{Kind: "remote", Title: "Sign In from Your Phone", Subtitle: "Press to show the code"}, cookies,
 			info("An Apple Music subscription is needed", "Songs download to the card, then play from it")}
 	case authExpired:
-		rows = []q2spot.Row{{Kind: "remote", Title: "Sign In Again from Your Phone", Subtitle: "Your sign-in has expired"}}
+		rows = []q2spot.Row{{Kind: "remote", Title: "Sign In Again from Your Phone", Subtitle: "Your sign-in has expired"}, cookies}
 	case authFree:
 		rows = []q2spot.Row{info("This account has no subscription", "Apple Music downloads need one"),
 			{Kind: "remote", Title: "Sign In with Another Account", Subtitle: "Press to show the code"},
