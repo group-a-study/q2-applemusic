@@ -31,7 +31,9 @@ type fakeApple struct {
 	mu     sync.Mutex
 	asked  []string // the AMP and playback paths asked, in order
 	active bool
-	token  string // the media-user-token it takes
+	token  string         // the media-user-token it takes
+	fail   map[string]int // songs the playback service refuses, how many more times
+	plays  map[string]int // the playback service's answers, by song
 }
 
 const devToken = "eyJhbGciOiJFUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln"
@@ -96,7 +98,7 @@ func songRes(s song, library bool) map[string]any {
 }
 
 func newFakeApple(t *testing.T) *fakeApple {
-	f := &fakeApple{t: t, active: true, token: "MUT" + strings.Repeat("x", 100)}
+	f := &fakeApple{t: t, active: true, token: "MUT" + strings.Repeat("x", 100), fail: map[string]int{}, plays: map[string]int{}}
 	mux := http.NewServeMux()
 	f.Server = httptest.NewServer(mux)
 	artBase = f.URL
@@ -167,6 +169,17 @@ func newFakeApple(t *testing.T) *fakeApple {
 		var body struct{ SalableAdamId string }
 		json.NewDecoder(r.Body).Decode(&body)
 		s := songs[body.SalableAdamId]
+		f.mu.Lock()
+		f.plays[s.id]++
+		refuse := f.fail[s.id] > 0
+		if refuse {
+			f.fail[s.id]--
+		}
+		f.mu.Unlock()
+		if refuse {
+			json.NewEncoder(w).Encode(map[string]any{"failureType": "9999", "customerMessage": "Something went wrong"})
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]any{"songList": []any{map[string]any{"assets": []any{
 			map[string]any{"flavor": "32:ctrp64", "URL": f.URL + "/hls/nope.m3u8"},
 			map[string]any{"flavor": "28:ctrp256", "URL": f.URL + "/hls/" + s.id + ".m3u8", "metadata": map[string]any{
@@ -213,7 +226,7 @@ func rig(t *testing.T, f *fakeApple) *daemon {
 	apple.HomeURL, apple.AMPURL, apple.PlayURL = f.URL, f.URL, f.URL
 	transport = func() http.RoundTripper { return http.DefaultTransport }
 	cardReady = func() bool { return true }
-	gap, retryIn, answerIn = 0, 50*time.Millisecond, 10*time.Second
+	gap, retryIn, answerIn, retryGap = 0, 50*time.Millisecond, 10*time.Second, 0
 	signinPort = 0
 	card := t.TempDir()
 	q2.Card = card
@@ -451,5 +464,61 @@ func TestNames(t *testing.T) {
 	}
 	if !leftover.MatchString("01 - Song [1].m4a.enc.part") || !leftover.MatchString("x.m4a.part") {
 		t.Error("leftover")
+	}
+}
+
+func TestRetries(t *testing.T) {
+	f := newFakeApple(t)
+	d := rig(t, f)
+	f.mu.Lock()
+	f.fail["101"], f.fail["103"] = 2, 99
+	f.mu.Unlock()
+	ask(d, "tracks", "album:l.a1")
+	ask(d, "tracks", "album:l.a2")
+	ask(d, "download", "album:l.a1")
+	ask(d, "download", "album:l.a2")
+	until(t, "the queue", func() bool { return !d.dl.pending() })
+	f.mu.Lock()
+	plays := fmt.Sprint(f.plays)
+	f.mu.Unlock()
+	// Tears in the Typing Pool on its third try; Spell Blue tried four times, then left; Valerie between.
+	if plays != "map[101:3 102:1 103:4]" {
+		t.Fatalf("playback asked %s", plays)
+	}
+	if d.dl.count() != 2 {
+		t.Fatalf("%d songs on the card", d.dl.count())
+	}
+	list := filepath.Join(q2.Card, "Apple Music", notDownloaded)
+	b, err := os.ReadFile(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	row := strings.Split(lines[len(lines)-1], "\t")
+	if lines[3] != "Artist\tAlbum\tTrack\tPlaylist\tReason\tLink\tWhen" || len(row) != 7 ||
+		strings.Join(row[:6], "|") != "Broadcast|Berberian Sound Studio|Spell Blue||Apple: Something went wrong|https://music.apple.com/au/song/103" ||
+		len(row[6]) != len("2026-11-04 14:03") {
+		t.Fatalf("Not Downloaded.txt:\n%s", b)
+	}
+	if r := ask(d, "downloads"); !strings.Contains(strings.Join(titles(r), "|"), "Spell Blue") {
+		t.Fatalf("downloads %q", titles(r))
+	}
+	// Kept across a restart.
+	if again := newDownloads(d, d.dl.folder, d.dl.file, d.dl.bulkFile); len(again.failed) != 1 || again.failed[0].Track.ID != "103" {
+		t.Fatalf("failed after a restart: %+v", again.failed)
+	}
+	// Tried again with Apple answering: it downloads, and leaves the list (the file goes with the last).
+	f.mu.Lock()
+	f.fail["103"] = 0
+	f.mu.Unlock()
+	if r := ask(d, "retry", "103"); r.Message != "Trying again" {
+		t.Fatalf("retry %+v", r)
+	}
+	until(t, "the retried song", func() bool { return !d.dl.pending() && d.dl.count() == 3 })
+	if _, err := os.Stat(list); !os.IsNotExist(err) {
+		t.Error("Not Downloaded.txt still there")
+	}
+	if _, err := os.Stat(d.dl.failedFile); !os.IsNotExist(err) {
+		t.Error("failed.json still there")
 	}
 }

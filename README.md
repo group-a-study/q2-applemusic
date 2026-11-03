@@ -27,6 +27,7 @@ Apple Music's page has **Downloaded Songs**, **Recently Added**, **Songs** (your
 - **Albums → Download All Albums** downloads every album in your library, and **Playlists → Download All Playlists** every playlist. They are fetched one at a time: the next album's songs are asked for once the last one's are on the card, so the Q2 never has hundreds of lists in hand, and Apple sees one song at a time at a person's pace. **Downloads** shows how many are left and has **Stop Download All**.
 - A song already on the card says so, and pressing it plays it from the card.
 - Downloads carry on with the page closed, one song at a time, and wait by themselves while you're offline. The Q2 stays awake while a song downloads.
+- A song that fails is tried 3 more times (5, 10 and 15 s apart), then the queue moves on without it. Each one left out is listed in `Apple Music/Not Downloaded.txt`: tab-separated (a spreadsheet opens it), with its artist, album, track, the playlist it came from, why, its music.apple.com link and when. **Downloads → Try the Failed Again** tries them again, and a song that downloads leaves the list; **Clear the Failed** empties it. Being offline, signed out or the card being away pauses the queue instead, without using up a song's tries.
 - Run **Library → Update Local Music** for your downloads to show in Artists, Albums and Coverflow too.
 - Each song is tagged with its lyrics when Apple has them: time-synced ones as LRC (`[01:03.01]A line`), shown in time in Now Playing, else the plain text.
 - Every song is AAC-LC 256 kbps (Apple's web stream, 44.1 kHz), in a plain M4A indexed as iTunes writes them, so it also plays on an iPod. A song at 48 kHz or more, which iPods skip on, is kept apart in `Apple Music/48khz/`, again as artist, album and song (`48khz/<artist>/<year> - <album>/`, a playlist's in `48khz/Playlists/<name>/`); **Downloaded Songs** lists them under **48 kHz and Higher**. With Apple's stream at 44.1 kHz, that folder is a safety net.
@@ -63,7 +64,7 @@ The setting is saved in `.applemusic/organize` and applies to new downloads.
 
 ## Update and remove
 
-**System settings → Apps** shows **Update** when a newer release is out. By hand, replace `.applemusic/q2-applemusic`, `.applemusic/run`, `.applemusic/q2app`, `.applemusic/icon.png` and `.applemusic/icon-40.png`. Either way, `.applemusic/media-user-token` (your sign-in), `.applemusic/organize`, `.applemusic/mode`, `.applemusic/queue.json` (songs waiting to download) and `.applemusic/bulk.json` (Download All's lists to go) are kept.
+**System settings → Apps** shows **Update** when a newer release is out. By hand, replace `.applemusic/q2-applemusic`, `.applemusic/run`, `.applemusic/q2app`, `.applemusic/icon.png` and `.applemusic/icon-40.png`. Either way, `.applemusic/media-user-token` (your sign-in), `.applemusic/organize`, `.applemusic/mode`, `.applemusic/queue.json` (songs waiting to download), `.applemusic/bulk.json` (Download All's lists to go) and `.applemusic/failed.json` (the songs in Not Downloaded.txt) are kept.
 
 To remove it, press **Apple Music** twice in **System settings → Apps**, or delete `.applemusic`. Your songs in `Apple Music/` stay.
 

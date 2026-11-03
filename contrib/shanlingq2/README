@@ -51,7 +51,8 @@ to a minute, runs it at nice 10 (playback and the Q2's pages first), and leaves 
 Stop Streaming Services, Home's Rockbox row, an Apps update or remove, and USB storage (after which
 it starts it again). With nothing to download and its page unused for 15 minutes, q2-applemusic
 stops by itself; a stream session waiting for the Q2 to play on keeps it going (for an hour without
-the Q2 moving on). It writes no log.
+the Q2 moving on). It writes no log: Not Downloaded.txt, the songs that failed, is the only report
+it leaves.
 
   /tmp/q2-applemusic.state
       hold=1 while a song downloads or streams in (Q2 Pod holds standby off) and version; while not
@@ -69,9 +70,11 @@ the Q2 moving on). It writes no log.
       POST /api/login takes the PIN, POST /api/token checks and saves a media-user-token (the value,
       a Cookie header or a cookies.txt), POST /api/signout removes it; posts need the header X-Q2: 1
   .applemusic/media-user-token, .applemusic/organize, .applemusic/mode, .applemusic/queue.json,
-  .applemusic/bulk.json
-      the sign-in, Organize Files (on, off), Mode (download, stream), the songs waiting and
-      Download All's lists to go; updates keep them
+  .applemusic/bulk.json, .applemusic/failed.json
+      the sign-in, Organize Files (on, off), Mode (download, stream), the songs waiting, Download
+      All's lists to go and the songs that failed; updates keep them
+  Apple Music/Not Downloaded.txt
+      the songs that failed, for a computer (Downloads, below)
   .applemusic/devtoken
       the web player's developer token, read from music.apple.com's script and kept until it
       expires or Apple refuses it
@@ -169,7 +172,14 @@ stream waits in Apple Music/ itself. Apple's web stream is 44.1 kHz, so this is 
 cover (600 px JPEG), and the lyrics when Apple has them (catalog songs/<id>/lyrics, TTML): timed by
 line, as LRC, "[01:03.01]A line" a line; else the plain text, a blank line between verses. Q2 Pod
 shows them in Now Playing. One song downloads at a time, two seconds apart. Offline, signed out,
-without a subscription or with the card away, the queue waits and tries again every 30 s.
+without a subscription or with the card away, the queue waits and tries again every 30 s. Any other
+failure is the song's: it is tried again three times, 5, 10 and 15 s apart (Downloads says "try 2 of
+4"), then joins the failed songs and the queue goes on. The failed songs are kept in
+.applemusic/failed.json (across restarts) and listed in Apple Music/Not Downloaded.txt, written
+before the queue moves on: two lines of explanation, a header, then a tab-separated line each with
+the song's artist, album, title, the playlist it came from, the reason, its music.apple.com/<country>/
+song/<id> link (gamdl takes it) and when. Try the Failed Again queues them; a song queued again
+leaves both files, and with none left they go. Clear the Failed empties them.
 
 Download All (bulk albums|playlists): the library's albums or playlists, as the page listed them,
 go in .applemusic/bulk.json. Once no song waits, the next list's songs are fetched and queued (a

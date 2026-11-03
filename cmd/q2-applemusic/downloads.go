@@ -42,6 +42,15 @@ var retryIn = 30 * time.Second
 // gap is the pause between two downloads, so a long queue asks Apple at a person's pace.
 var gap = 2 * time.Second
 
+// songRetries is how many times a song that fails is tried again, retryGap apart (then twice
+// that, and so on), before the queue goes on without it and it joins Not Downloaded.txt.
+const songRetries = 3
+
+var retryGap = 5 * time.Second
+
+// notDownloaded is the list of the songs that failed, in Apple Music/ for a computer to open.
+const notDownloaded = "Not Downloaded.txt"
+
 // maxTries is how many times a song may be under way when q2-applemusic dies (killed, out of
 // memory, a crash) before the queue moves it to the failed ones, so one song can't keep the add-on
 // down: its launcher restarts it, and the queue would start that song again first.
@@ -55,10 +64,13 @@ const playlistsDir = "Playlists"
 const marker = ".q2-playlist"
 
 type item struct {
-	Track apple.Track `json:"track"`
-	Err   string      `json:"err,omitempty"` // a failed one's reason
-	Path  string      `json:"path,omitempty"`
-	Tries int         `json:"tries,omitempty"` // the times it was under way when q2-applemusic died
+	Track   apple.Track `json:"track"`
+	Err     string      `json:"err,omitempty"` // a failed one's reason
+	At      string      `json:"at,omitempty"`  // and when, "2026-11-04 14:03"
+	Link    string      `json:"link,omitempty"`
+	Path    string      `json:"path,omitempty"`
+	Tries   int         `json:"tries,omitempty"` // the times it was under way when q2-applemusic died
+	Attempt int         `json:"-"`               // the try under way now, from 1
 }
 
 // key is what a song is on the card as: its id, or in a playlist's album, the playlist's and its.
@@ -81,10 +93,11 @@ type bulkJob struct {
 }
 
 type downloads struct {
-	d        *daemon
-	folder   string // Apple Music/ on the card
-	file     string // .applemusic/queue.json
-	bulkFile string // .applemusic/bulk.json
+	d          *daemon
+	folder     string // Apple Music/ on the card
+	file       string // .applemusic/queue.json
+	bulkFile   string // .applemusic/bulk.json
+	failedFile string // .applemusic/failed.json: the failed songs, kept across restarts
 
 	mu        sync.Mutex
 	wmu       sync.Mutex // one queue.json write at a time: they share its .tmp
@@ -106,7 +119,7 @@ type downloads struct {
 
 func newDownloads(d *daemon, folder, file, bulkFile string) *downloads {
 	dl := &downloads{d: d, folder: folder, file: file, bulkFile: bulkFile, wake: make(chan struct{}, 1),
-		have: map[string]string{}, ids: map[string]string{}}
+		failedFile: filepath.Join(filepath.Dir(file), "failed.json"), have: map[string]string{}, ids: map[string]string{}}
 	var kept []*item
 	if b, err := os.ReadFile(file); err == nil {
 		json.Unmarshal(b, &kept)
@@ -118,6 +131,15 @@ func newDownloads(d *daemon, folder, file, bulkFile string) *downloads {
 	}
 	if b, err := os.ReadFile(bulkFile); err == nil {
 		json.Unmarshal(b, &dl.bulk)
+	}
+	var failed []*item
+	if b, err := os.ReadFile(dl.failedFile); err == nil {
+		json.Unmarshal(b, &failed)
+	}
+	for _, it := range failed {
+		if it != nil && it.Track.ID != "" {
+			dl.failed = append(dl.failed, it)
+		}
 	}
 	dl.sweep()
 	dl.rescan()
@@ -259,7 +281,7 @@ func (dl *downloads) state(t apple.Track) (string, string) {
 // returns how many it queued.
 func (dl *downloads) add(ts []apple.Track) int {
 	dl.mu.Lock()
-	n := 0
+	n, had := 0, len(dl.failed)
 	queued := map[string]bool{}
 	if dl.cur != nil {
 		queued[key(dl.cur.Track)] = true
@@ -277,7 +299,11 @@ func (dl *downloads) add(ts []apple.Track) int {
 		dl.waiting = append(dl.waiting, &item{Track: t})
 		n++
 	}
+	changed := len(dl.failed) != had
 	dl.mu.Unlock()
+	if changed {
+		dl.saveFailed()
+	}
 	if n > 0 {
 		dl.save()
 		dl.poke()
@@ -339,13 +365,80 @@ func (dl *downloads) retry(k string) int {
 	}
 	dl.failed = keep
 	dl.mu.Unlock()
+	dl.saveFailed()
 	return dl.add(again)
 }
 
+// clearFailed forgets the failed songs, Not Downloaded.txt with them.
 func (dl *downloads) clearFailed() {
 	dl.mu.Lock()
 	dl.failed = nil
 	dl.mu.Unlock()
+	dl.saveFailed()
+}
+
+// fail moves the song under way to the failed ones, noted in Not Downloaded.txt.
+func (dl *downloads) fail(it *item, why string, am *apple.Client) {
+	it.Err, it.At, it.Tries, it.Attempt = why, time.Now().Format("2006-01-02 15:04"), 0, 0
+	sf := "us"
+	if a := am.Known(); a != nil {
+		sf = a.Storefront
+	}
+	it.Link = "https://music.apple.com/" + sf + "/song/" + it.Track.ID
+	dl.mu.Lock()
+	dl.failed = append(drop(dl.failed, key(it.Track)), it)
+	dl.mu.Unlock()
+	dl.saveFailed() // noted before the queue moves on
+	dl.mu.Lock()
+	dl.cur, dl.cancel = nil, nil
+	dl.mu.Unlock()
+}
+
+// saveFailed writes the failed songs to .applemusic/failed.json, and as Not Downloaded.txt in Apple
+// Music/: a line each, tab-separated (a spreadsheet opens it), its artist, album, title, the
+// playlist it came from, why, its link on music.apple.com (which gamdl takes) and when. With none,
+// both files go.
+func (dl *downloads) saveFailed() {
+	dl.wmu.Lock()
+	defer dl.wmu.Unlock()
+	dl.mu.Lock()
+	failed := make([]item, 0, len(dl.failed))
+	for _, it := range dl.failed {
+		failed = append(failed, *it)
+	}
+	dl.mu.Unlock()
+	list := filepath.Join(dl.folder, notDownloaded)
+	if !cardReady() {
+		return
+	}
+	if len(failed) == 0 {
+		os.Remove(dl.failedFile)
+		os.Remove(list)
+		return
+	}
+	b, _ := json.Marshal(failed)
+	q2.WriteFile(dl.failedFile, b)
+	clean := strings.NewReplacer("\t", " ", "\n", " ", "\r", " ")
+	var t strings.Builder
+	t.WriteString("Songs q2-applemusic couldn't download, each tried " + itoa(songRetries+1) + " times, oldest first.\n")
+	t.WriteString("On the Q2, Downloads -> Try the Failed Again tries them again; a song that downloads leaves this list.\n\n")
+	t.WriteString("Artist\tAlbum\tTrack\tPlaylist\tReason\tLink\tWhen\n")
+	for _, it := range failed {
+		playlist := ""
+		if it.Track.List != nil {
+			playlist = it.Track.List.Name
+		}
+		for i, f := range []string{it.Track.Artist, it.Track.Album, it.Track.Name, playlist, it.Err, it.Link, it.At} {
+			if i > 0 {
+				t.WriteString("\t")
+			}
+			t.WriteString(clean.Replace(f))
+		}
+		t.WriteString("\n")
+	}
+	if os.MkdirAll(dl.folder, 0o755) == nil {
+		q2.WriteFile(list, []byte(t.String()))
+	}
 }
 
 // busy is whether a song is downloading: the Q2 kept awake.
@@ -611,11 +704,7 @@ func (dl *downloads) next(ctx context.Context) bool {
 		return false
 	}
 	if it.Tries >= maxTries { // under way each time q2-applemusic died: not again by itself
-		it.Err, it.Tries = "it stopped Apple Music each time", 0
-		dl.mu.Lock()
-		dl.failed = append(dl.failed, it)
-		dl.cur, dl.cancel = nil, nil
-		dl.mu.Unlock()
+		dl.fail(it, "it stopped Apple Music each time", am)
 		dl.save()
 		return true
 	}
@@ -624,8 +713,25 @@ func (dl *downloads) next(ctx context.Context) bool {
 	it.Tries++
 	dl.mu.Unlock()
 	dl.write()
-	path, err := dl.d.fetchSong(one, am, it.Track, dl.place)
+	// A failure is tried again songRetries times; one that is the network's, the sign-in's or the
+	// card's isn't the song's, and stalls the queue instead.
+	var path string
+	var err error
+	for try := 0; ; try++ {
+		dl.mu.Lock()
+		it.Attempt = try + 1
+		dl.mu.Unlock()
+		if path, err = dl.d.fetchSong(one, am, it.Track, dl.place); err == nil || try == songRetries ||
+			one.Err() != nil || dl.why(err) != "" {
+			break
+		}
+		select {
+		case <-one.Done():
+		case <-time.After(retryGap * time.Duration(try+1)):
+		}
+	}
 	dl.mu.Lock()
+	it.Attempt = 0
 	it.Tries--
 	dropped := dl.dropped
 	dl.mu.Unlock()
@@ -657,11 +763,7 @@ func (dl *downloads) next(ctx context.Context) bool {
 		dl.stall(it, dl.why(err))
 		return false
 	default:
-		it.Err = dl.reason(err, am)
-		dl.mu.Lock()
-		dl.failed = append(dl.failed, it)
-		dl.cur, dl.cancel = nil, nil
-		dl.mu.Unlock()
+		dl.fail(it, dl.reason(err, am), am)
 	}
 	dl.save()
 	return true

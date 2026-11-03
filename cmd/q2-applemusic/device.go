@@ -941,7 +941,11 @@ func (d *daemon) downloadsPage(cursor string) q2spot.Reply {
 		rows = append(rows, info("Waiting: "+stalled, "It tries again by itself"))
 	}
 	if cur != nil {
-		rows = append(rows, info("Downloading "+cur.Track.Name, cur.Track.Artist+" · "+plural(len(waiting), "song")+" after it"))
+		sub := cur.Track.Artist + " · " + plural(len(waiting), "song") + " after it"
+		if cur.Attempt > 1 {
+			sub = fmt.Sprintf("%s · try %d of %d", cur.Track.Artist, cur.Attempt, songRetries+1)
+		}
+		rows = append(rows, info("Downloading "+cur.Track.Name, sub))
 	}
 	if left > 0 {
 		sub := fmt.Sprintf("%d of %d lists to go", left, total)
@@ -958,7 +962,7 @@ func (d *daemon) downloadsPage(cursor string) q2spot.Reply {
 	if len(failed) > 0 {
 		rows = append(rows, q2spot.Row{Kind: "action", URI: "retry", Title: "Try the Failed Again",
 			Subtitle: plural(len(failed), "song")},
-			q2spot.Row{Kind: "action", URI: "clearfailed", Title: "Clear the Failed"})
+			q2spot.Row{Kind: "action", URI: "clearfailed", Title: "Clear the Failed", Subtitle: "And Apple Music/" + notDownloaded})
 	}
 	for _, it := range waiting {
 		rows = append(rows, q2spot.Row{Kind: "action", URI: "cancel", Context: key(it.Track), Title: it.Track.Name,
