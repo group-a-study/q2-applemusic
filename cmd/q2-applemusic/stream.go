@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/group-a-study/q2-applemusic/internal/apple"
-	"github.com/group-a-study/q2-applemusic/internal/mp4"
 	"github.com/group-a-study/q2-applemusic/internal/q2"
 )
 
@@ -262,7 +261,9 @@ func (s *streamer) fetch(ctx context.Context, dir, name string, t apple.Track) {
 		}
 	}
 	t.List = nil
-	at := func(t apple.Track, m apple.Meta) (string, string, *mp4.Tags) { return dir, name, tagsOf(t, m) }
+	at := func(t apple.Track, m apple.Meta) spot {
+		return spot{dir: dir, name: name, tmp: dir, tags: tagsOf(t, m)}
+	}
 	for try := 0; ctx.Err() == nil; try++ {
 		am, err := s.d.session()
 		if err == nil {

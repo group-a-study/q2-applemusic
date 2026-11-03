@@ -281,8 +281,11 @@ func (d *daemon) device(req q2spot.Request) q2spot.Reply {
 			return ok("A press plays the song; nothing is kept")
 		}
 		return ok("A press downloads the song")
-	case "cardartists":
-		return d.cardArtists(cursor(req, 0))
+	case "cardartists": // Apple Music/ or its 48khz/
+		if req.Arg(0) == hiresDir {
+			return d.cardArtists(hiresDir, cursor(req, 1))
+		}
+		return d.cardArtists("", cursor(req, 0))
 	case "cardalbums":
 		return d.cardAlbums(req.Arg(0), cursor(req, 1))
 	case "signout":
@@ -762,23 +765,35 @@ func songsIn(dir string) (int, []string) {
 	return n, dirs
 }
 
-// cardArtists is Downloaded Songs with Artist/Album folders on the card: the songs in Apple Music/
-// itself (downloaded with Organize Files off), newest first, then each artist's folder
-// (Playlists' among them).
-func (d *daemon) cardArtists(cursor string) q2spot.Reply {
-	loose, artists := songsIn(d.dl.folder)
+// cardArtists is Downloaded Songs with Artist/Album folders on the card (in base: "" for Apple
+// Music/ itself, or 48khz): the songs in Apple Music/ itself (downloaded with Organize Files off),
+// newest first, then each artist's folder (Playlists' among them), then 48 kHz and Higher, which
+// lists its own the same way.
+func (d *daemon) cardArtists(base, cursor string) q2spot.Reply {
+	root := filepath.Join(d.dl.folder, base)
+	loose, artists := songsIn(root)
 	var rows []q2spot.Row
-	if loose > 0 {
-		rows = append(rows, q2spot.Row{Kind: "local", URI: d.dl.folder + "/", Title: "Unsorted Songs",
+	if loose > 0 && base == "" {
+		rows = append(rows, q2spot.Row{Kind: "local", URI: root + "/", Title: "Unsorted Songs",
 			Subtitle: plural(loose, "song") + " in Apple Music/, newest first"})
 	}
+	hires := false
 	for _, a := range artists {
-		_, albums := songsIn(filepath.Join(d.dl.folder, a))
+		if base == "" && a == hiresDir {
+			hires = true
+			continue
+		}
+		_, albums := songsIn(filepath.Join(root, a))
 		what := plural(len(albums), "album")
 		if a == playlistsDir {
 			what = plural(len(albums), "playlist") + ", each as an album"
 		}
-		rows = append(rows, q2spot.Row{Kind: "list", URI: "cardalbums", Context: a, Title: a, Subtitle: what})
+		rows = append(rows, q2spot.Row{Kind: "list", URI: "cardalbums", Context: filepath.Join(base, a), Title: a, Subtitle: what})
+	}
+	if hires {
+		_, as := songsIn(filepath.Join(root, hiresDir))
+		rows = append(rows, q2spot.Row{Kind: "list", URI: "cardartists", Context: hiresDir, Title: "48 kHz and Higher",
+			Subtitle: plural(len(as), "artist") + ", kept apart for iPods"})
 	}
 	if len(rows) == 0 {
 		rows = append(rows, info("Nothing on the card yet", "Downloaded songs show here"))
@@ -799,10 +814,11 @@ func albumYear(folder string) (string, int) {
 
 var yearPrefix = regexp.MustCompile(`^([0-9]{4}) - (.+)$`)
 
-// cardAlbums is an artist's folder: each album's, oldest first (then by name), its songs in track
-// order.
+// cardAlbums is an artist's folder (in Apple Music/, or 48khz/<artist>): each album's, oldest first
+// (then by name), its songs in track order.
 func (d *daemon) cardAlbums(artist, cursor string) q2spot.Reply {
-	if artist == "" || artist == "." || artist == ".." || strings.ContainsAny(artist, "/\\") {
+	name := strings.TrimPrefix(artist, hiresDir+"/") // an artist in 48khz/
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
 		return q2spot.Fail(q2spot.Bad, "Bad request")
 	}
 	dir := filepath.Join(d.dl.folder, artist)

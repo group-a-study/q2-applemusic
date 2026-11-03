@@ -32,13 +32,14 @@ func be32(v uint32) []byte { return binary.BigEndian.AppendUint32(nil, v) }
 // ESDS is an AAC-LC, 44.1 kHz stereo decoder configuration.
 var ESDS = fullbox("esds", 0, 0, []byte{3, 25, 0, 1, 0, 4, 17, 0x40, 0x15, 0, 0, 0, 0, 3, 0xe8, 0, 0, 3, 0xe8, 0, 5, 2, 0x12, 0x10, 6, 1, 2})
 
-// encEntry is an enca sample entry protected with CENC under kid, its decoder configuration esds.
-func encEntry(kid, esds []byte) []byte {
+// encEntry is an enca sample entry at rate Hz protected with CENC under kid, its decoder
+// configuration esds.
+func encEntry(kid, esds []byte, rate uint16) []byte {
 	body := make([]byte, 28)
-	body[7] = 1                     // data reference index
-	body[17] = 2                    // channels
-	body[19] = 16                   // sample size
-	body[24], body[25] = 0xac, 0x44 // 44100 << 16
+	body[7] = 1                                    // data reference index
+	body[17] = 2                                   // channels
+	body[19] = 16                                  // sample size
+	body[24], body[25] = byte(rate>>8), byte(rate) // rate << 16
 	tenc := fullbox("tenc", 0, 0, []byte{0, 0, 1, 8}, kid)
 	sinf := mkbox("sinf", mkbox("frma", []byte("mp4a")), fullbox("schm", 0, 0, []byte("cenc"), be32(0x10000)),
 		mkbox("schi", tenc))
@@ -49,14 +50,19 @@ func encEntry(kid, esds []byte) []byte {
 // key, the first fragment under the first (the prefetch key), the rest under the second, with
 // 8-byte IVs in senc, and an edit list skipping the encoder's priming.
 func Fragmented(samples [][]byte, keys, kids [][]byte, perFrag int, priming uint32, esds []byte) []byte {
+	return FragmentedAt(44100, samples, keys, kids, perFrag, priming, esds)
+}
+
+// FragmentedAt is Fragmented at another sample rate.
+func FragmentedAt(rate uint16, samples [][]byte, keys, kids [][]byte, perFrag int, priming uint32, esds []byte) []byte {
 	tkhd := make([]byte, 80)
 	tkhd[15] = 1 // track 1
 	mvhd := make([]byte, 96)
 	copy(mvhd[12:], be32(600))
 	mdhd := make([]byte, 24)
-	copy(mdhd[12:], be32(44100))
+	copy(mdhd[12:], be32(uint32(rate)))
 	elst := fullbox("elst", 0, 0, be32(1), be32(0), be32(priming), be32(1<<16))
-	stsd := fullbox("stsd", 0, 0, be32(2), encEntry(kids[0], esds), encEntry(kids[1], esds))
+	stsd := fullbox("stsd", 0, 0, be32(2), encEntry(kids[0], esds, rate), encEntry(kids[1], esds, rate))
 	empty := func(typ string) []byte { return fullbox(typ, 0, 0, be32(0)) }
 	stbl := mkbox("stbl", stsd, empty("stts"), empty("stsc"), fullbox("stsz", 0, 0, be32(0), be32(0)), empty("stco"))
 	minf := mkbox("minf", fullbox("smhd", 0, 0, make([]byte, 4)), mkbox("dinf", fullbox("dref", 0, 0, be32(1), fullbox("url ", 0, 1))), stbl)

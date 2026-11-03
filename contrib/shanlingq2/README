@@ -124,8 +124,9 @@ order), info does nothing. A row's position is the op Play/Pause held sends.
       the queue; cancel <key>, cancelall, retry [<key>], clearfailed, bulkstop
   cardartists, cardalbums <artist>
       Downloaded Songs with Artist/Album folders on the card: the songs in Apple Music/ itself
-      (Unsorted Songs), then each artist's folder, Playlists among them; an artist's albums,
-      oldest first, each a local folder row with context album
+      (Unsorted Songs), then each artist's folder, Playlists among them, then 48 kHz and Higher
+      (cardartists 48khz, its artists as cardalbums 48khz/<artist>); an artist's albums, oldest
+      first, each a local folder row with context album
   mode, organize, account, signout, stop
       Mode download or stream; Organize Files on or off; the account (subscription, country) and
       Sign Out; the token removed; the app stopped
@@ -160,8 +161,10 @@ two). The stream is fetched to <name>.m4a.enc.part beside its name, then each sa
 into <name>.m4a.part: ftyp M4A, a moov (the stream's mvhd, tkhd, mdhd and hdlr with the real
 duration, its edit list for the encoder's priming, one sample description as mp4a with no sinf,
 stts, stsc, stsz and stco in chunks of 44 samples, about a second each, as iTunes writes them),
-then one mdat; renamed into place. A stream over 48 kHz, which iPods skip on, is refused (Apple's
-web stream is 44.1 kHz). The tags are iTunes atoms in moov/udta/meta/ilst (©nam, ©ART, aART, ©alb,
+then one mdat; renamed into place. A stream of 48 kHz or more (its sample description's rate), which
+iPods skip on, goes in Apple Music/48khz/ instead, always as <album artist>/<year> - <album>/ (a
+playlist's as Playlists/<playlist>/), the folder chosen once the stream is read: the encrypted
+stream waits in Apple Music/ itself. Apple's web stream is 44.1 kHz, so this is a safety net. The tags are iTunes atoms in moov/udta/meta/ilst (©nam, ©ART, aART, ©alb,
 ©gen, ©day, ©wrt, cprt, trkn, disk, cpil, rtng, cnID, stik, covr, ©lyr), as TagLib reads them: the
 cover (600 px JPEG), and the lyrics when Apple has them (catalog songs/<id>/lyrics, TTML): timed by
 line, as LRC, "[01:03.01]A line" a line; else the plain text, a blank line between verses. Q2 Pod

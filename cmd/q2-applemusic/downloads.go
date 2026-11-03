@@ -683,25 +683,29 @@ func (dl *downloads) reason(err error, am *apple.Client) string {
 
 // place is where a song downloads, as what, with its tags (m the playback service's): a
 // playlist's in the playlist's album; else its album's folder, or Apple Music/ itself with
-// Organize Files off.
-func (dl *downloads) place(t apple.Track, m apple.Meta) (string, string, *mp4.Tags) {
+// Organize Files off. At 48 kHz or more, the same under 48khz/, always as Artist/Album.
+func (dl *downloads) place(t apple.Track, m apple.Meta) spot {
 	tags := tagsOf(t, m)
-	if l := t.List; l != nil {
-		dir, album := dl.playlistDir(l)
-		tags.Album, tags.AlbumArtist, tags.Compilation = album, playlistsDir, true
-		tags.Track, tags.Tracks, tags.Disc, tags.Discs = l.Pos, l.Count, 0, 0
-		return dir, songName(t.ID, tags.Title, l.Pos, l.Count, 0, 0), tags
-	}
-	if !dl.d.organized() {
-		return dl.folder, flatName(t.ID, tags.Title, tags.Artist), tags
-	}
 	year := m.Year()
 	if year == "" {
 		year = t.Year
 	}
-	dir := filepath.Join(dl.folder, folderName(tags.AlbumArtist, "Unknown Artist"),
-		albumFolderName(tags.Album, year, "Unknown Album"))
-	return dir, songName(t.ID, tags.Title, tags.Track, tags.Tracks, tags.Disc, tags.Discs), tags
+	album := filepath.Join(folderName(tags.AlbumArtist, "Unknown Artist"), albumFolderName(tags.Album, year, "Unknown Album"))
+	sp := spot{tmp: dl.folder, tags: tags, hires: filepath.Join(dl.folder, hiresDir, album)}
+	switch l := t.List; {
+	case l != nil:
+		dir, name := dl.playlistDir(l)
+		tags.Album, tags.AlbumArtist, tags.Compilation = name, playlistsDir, true
+		tags.Track, tags.Tracks, tags.Disc, tags.Discs = l.Pos, l.Count, 0, 0
+		sp.dir, sp.name = dir, songName(t.ID, tags.Title, l.Pos, l.Count, 0, 0)
+		sp.hires = filepath.Join(dl.folder, hiresDir, playlistsDir, filepath.Base(dir))
+	case !dl.d.organized():
+		sp.dir, sp.name = dl.folder, flatName(t.ID, tags.Title, tags.Artist)
+	default:
+		sp.dir = filepath.Join(dl.folder, album)
+		sp.name = songName(t.ID, tags.Title, tags.Track, tags.Tracks, tags.Disc, tags.Discs)
+	}
+	return sp
 }
 
 // tagsOf is a song's tags: the playback service's, the list's where it said nothing.

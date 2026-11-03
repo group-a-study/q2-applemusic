@@ -29,7 +29,7 @@ Apple Music's page has **Downloaded Songs**, **Recently Added**, **Songs** (your
 - Downloads carry on with the page closed, one song at a time, and wait by themselves while you're offline. The Q2 stays awake while a song downloads.
 - Run **Library → Update Local Music** for your downloads to show in Artists, Albums and Coverflow too.
 - Each song is tagged with its lyrics when Apple has them: time-synced ones as LRC (`[01:03.01]A line`), shown in time in Now Playing, else the plain text.
-- Every song is AAC-LC 256 kbps at 44.1 kHz (Apple's web stream), in a plain M4A indexed as iTunes writes them, so it also plays on an iPod; anything over 48 kHz, which iPods skip on, is refused.
+- Every song is AAC-LC 256 kbps (Apple's web stream, 44.1 kHz), in a plain M4A indexed as iTunes writes them, so it also plays on an iPod. A song at 48 kHz or more, which iPods skip on, is kept apart in `Apple Music/48khz/`, again as artist, album and song (`48khz/<artist>/<year> - <album>/`, a playlist's in `48khz/Playlists/<name>/`); **Downloaded Songs** lists them under **48 kHz and Higher**. With Apple's stream at 44.1 kHz, that folder is a safety net.
 - Your account's country (its storefront) decides what Apple licenses: a song it doesn't license there fails, saying so.
 
 ## Playlists are kept as albums

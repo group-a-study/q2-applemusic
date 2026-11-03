@@ -54,7 +54,11 @@ func stream(id string) []byte {
 	for i := 0; i < 50; i++ {
 		ss = append(ss, sample(id, i))
 	}
-	return mp4test.Fragmented(ss, [][]byte{prefetch, songKey},
+	rate := uint16(44100)
+	if id == "103" { // Berberian Sound Studio: a 48 kHz master, kept in 48khz/
+		rate = 48000
+	}
+	return mp4test.FragmentedAt(rate, ss, [][]byte{prefetch, songKey},
 		[][]byte{[]byte("\x00\x00\x00\x00\x00\x00\x00\x00s1/e1   "), bytes.Repeat([]byte{0xab}, 16)}, 20, 0, mp4test.ESDS)
 }
 
@@ -272,7 +276,7 @@ func TestDownloadAllAlbums(t *testing.T) {
 	}
 	root := filepath.Join(q2.Card, "Apple Music", "Broadcast")
 	a := filepath.Join(root, "2005 - Tender Buttons", "02 - Valerie [102].m4a")
-	b := filepath.Join(root, "2005 - Berberian Sound Studio", "01 - Spell Blue [103].m4a")
+	b := filepath.Join(q2.Card, "Apple Music", "48khz", "Broadcast", "2005 - Berberian Sound Studio", "01 - Spell Blue [103].m4a")
 	until(t, "both albums", func() bool {
 		_, e1 := os.Stat(a)
 		_, e2 := os.Stat(b)
@@ -301,6 +305,26 @@ func TestDownloadAllAlbums(t *testing.T) {
 	}
 	if r := ask(d, "tracks", "album:l.a1"); r.Rows[0].Title != "All on the card" || r.Rows[1].Kind != "local" {
 		t.Errorf("album page: %+v", r.Rows)
+	}
+	// The 48 kHz album is kept apart, and only there; Downloaded Songs browses it the same way.
+	if _, err := os.Stat(filepath.Join(root, "2005 - Berberian Sound Studio")); !os.IsNotExist(err) {
+		t.Error("the 48 kHz album's folder was also made in the usual place")
+	}
+	if got := titles(ask(d, "cardartists")); strings.Join(got, "|") != "Broadcast|48 kHz and Higher" {
+		t.Errorf("Downloaded Songs %q", got)
+	}
+	if r := ask(d, "cardartists", "48khz"); len(r.Rows) != 1 || r.Rows[0].Title != "Broadcast" || r.Rows[0].Context != "48khz/Broadcast" {
+		t.Errorf("48 kHz and Higher %+v", r.Rows)
+	}
+	if r := ask(d, "cardalbums", "48khz/Broadcast"); len(r.Rows) != 1 || r.Rows[0].Title != "Berberian Sound Studio" ||
+		r.Rows[0].URI != filepath.Dir(b)+"/" {
+		t.Errorf("48 kHz artist %+v", r.Rows)
+	}
+	if r := ask(d, "cardalbums", "48khz/../x"); r.Status != q2spot.Bad {
+		t.Errorf("a path out of 48khz/ taken: %+v", r)
+	}
+	if tg := song4a(t, b, "103"); tg["\xa9alb"] != "Berberian Sound Studio" || tg["aART"] != "Broadcast" {
+		t.Errorf("48 kHz song tags %q", tg)
 	}
 }
 

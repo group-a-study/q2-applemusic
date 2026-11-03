@@ -75,8 +75,11 @@ func TestLive(t *testing.T) {
 	tags := &mp4.Tags{Title: s.Meta.Title, Artist: s.Meta.Artist, Album: s.Meta.Album, AlbumArtist: s.Meta.AlbumArtist,
 		Date: s.Meta.Date, Track: s.Meta.Track, Tracks: s.Meta.Tracks, Disc: s.Meta.Disc, Discs: s.Meta.Discs,
 		Lyrics: lyr, Cover: c.Cover(ctx, tr.Artwork, 600)}
-	out := filepath.Join(dir, "song.m4a")
-	if err := c.Save(ctx, s, out, tags); err != nil {
+	out, err := c.Save(ctx, s, filepath.Join(dir, "song.m4a.enc.part"), tags, func(rate int) (string, error) {
+		t.Logf("sample rate %d Hz", rate)
+		return filepath.Join(dir, "song.m4a"), nil
+	})
+	if err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	fi, _ := os.Stat(out)

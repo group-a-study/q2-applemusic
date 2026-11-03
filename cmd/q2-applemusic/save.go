@@ -14,28 +14,56 @@ import (
 // Q2's screen shows, under what its decoder takes.
 const coverSize = 600
 
-// fetchSong downloads a song: asked of the playback service, placed by at (its folder, file name
-// and tags), its cover and lyrics fetched, saved as <name>.m4a. A playlist's album gets its marker
-// and the playlist's cover first. Its path, or why not; a folder it made for nothing is removed.
+// hiresRate is the sample rate from which a download goes in hiresDir: iPods skip on such songs,
+// so they are kept apart (Apple's web stream is 44.1 kHz, so this is a safety net).
+const hiresRate = 48000
+
+// hiresDir is the folder in Apple Music/ holding songs of hiresRate or more, as Artist/Album/Song.
+const hiresDir = "48khz"
+
+// spot is where a song goes: its folder and file name (without .m4a), its folder should its stream
+// be hiresRate or more ("" the same), the folder its encrypted stream waits in, and its tags.
+type spot struct {
+	dir, name, hires, tmp string
+	tags                  *mp4.Tags
+}
+
+// fetchSong downloads a song: asked of the playback service, placed by at, its cover and lyrics
+// fetched, saved as <name>.m4a in its folder for the stream's sample rate. A playlist's album gets
+// its marker and the playlist's cover. Its path, or why not; a folder it made for nothing is removed.
 func (d *daemon) fetchSong(ctx context.Context, am *apple.Client, t apple.Track,
-	at func(apple.Track, apple.Meta) (string, string, *mp4.Tags)) (string, error) {
+	at func(apple.Track, apple.Meta) spot) (string, error) {
 	s, err := am.Prepare(ctx, t.ID)
 	if err != nil {
 		return "", err
 	}
-	dir, name, tags := at(t, s.Meta)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	sp := at(t, s.Meta)
+	if err := os.MkdirAll(sp.tmp, 0o755); err != nil {
 		return "", err
 	}
-	if t.List != nil {
-		d.playlistAlbum(ctx, am, dir, t.List)
+	sp.tags.Cover = am.Cover(ctx, t.Artwork, coverSize)
+	sp.tags.Lyrics = am.Lyrics(ctx, t.ID)
+	made := ""
+	where := func(rate int) (string, error) {
+		dir := sp.dir
+		if rate >= hiresRate && sp.hires != "" {
+			dir = sp.hires
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+		made = dir
+		if t.List != nil {
+			d.playlistAlbum(ctx, am, dir, t.List)
+		}
+		return filepath.Join(dir, sp.name+".m4a"), nil
 	}
-	tags.Cover = am.Cover(ctx, t.Artwork, coverSize)
-	tags.Lyrics = am.Lyrics(ctx, t.ID)
-	path := filepath.Join(dir, name+".m4a")
-	if err := am.Save(ctx, s, path, tags); err != nil {
-		os.Remove(dir) // only if empty: an album's folder this song would have started
-		os.Remove(filepath.Dir(dir))
+	path, err := am.Save(ctx, s, filepath.Join(sp.tmp, sp.name+".m4a.enc.part"), sp.tags, where)
+	if err != nil {
+		if made != "" && made != sp.tmp {
+			os.Remove(made) // only if empty: an album's folder this song would have started
+			os.Remove(filepath.Dir(made))
+		}
 		return "", err
 	}
 	return path, nil

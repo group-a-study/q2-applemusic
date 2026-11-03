@@ -441,51 +441,52 @@ func (a *alive) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// Save downloads the song to path: its stream fetched to path.enc.part, its key from the license,
-// its samples decrypted into path.part with tags (and cover and lyrics, if given), renamed into
-// place. Nothing is left but path, or nothing on failure.
-func (c *Client) Save(ctx context.Context, s *Song, path string, tags *mp4.Tags) error {
+// Save downloads the song: its stream fetched to tmp (an .enc.part file), its key from the
+// license, then its samples decrypted into the file where names for the stream's sample rate
+// (written as <that>.part, renamed into place), with tags. The path it saved to; nothing is left
+// but that, or nothing on failure.
+func (c *Client) Save(ctx context.Context, s *Song, tmp string, tags *mp4.Tags, where func(rate int) (string, error)) (string, error) {
 	text, err := c.fetch(ctx, s.stream, 4<<20)
 	if err != nil {
-		return err
+		return "", err
 	}
 	keys, pieces, err := playlist(s.stream, text)
 	if err != nil {
-		return err
+		return "", err
 	}
 	keyURI := songKey(keys)
 	if keyURI == "" {
-		return errors.New("Apple's stream has no Widevine key")
+		return "", errors.New("Apple's stream has no Widevine key")
 	}
-	enc, part := path+".enc.part", path+".part"
-	defer os.Remove(enc)
-	if err := c.download(ctx, pieces, enc); err != nil {
-		return err
+	defer os.Remove(tmp)
+	if err := c.download(ctx, pieces, tmp); err != nil {
+		return "", err
 	}
-	f, err := os.Open(enc)
+	f, err := os.Open(tmp)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
-		return err
+		return "", err
 	}
 	st, err := mp4.Read(f, fi.Size())
 	if err != nil {
-		return err
-	}
-	// iPods play AAC up to 48 kHz and skip above it; the web stream is always 44.1 kHz.
-	if r := st.SampleRate(); r > 48000 {
-		return fmt.Errorf("the stream is %d Hz, more than an iPod plays", r)
+		return "", err
 	}
 	ks, err := c.keys(ctx, s.ID, keyURI, st.KeyIDs())
 	if err != nil {
-		return err
+		return "", err
 	}
+	path, err := where(st.SampleRate())
+	if err != nil {
+		return "", err
+	}
+	part := path + ".part"
 	out, err := os.Create(part)
 	if err != nil {
-		return err
+		return "", err
 	}
 	err = st.Write(out, f, ks, tags)
 	if err == nil {
@@ -499,8 +500,9 @@ func (c *Client) Save(ctx context.Context, s *Song, path string, tags *mp4.Tags)
 	}
 	if err != nil {
 		os.Remove(part)
+		return "", err
 	}
-	return err
+	return path, nil
 }
 
 // Cover is an artwork template's picture, size px square, as a JPEG; nil without one.
