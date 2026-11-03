@@ -40,7 +40,7 @@ A song downloaded from a playlist (pressed in it, its **Download All**, or **Dow
     Apple Music/Playlists/Road Trip/02 - Valerie [102].m4a
     Apple Music/Playlists/Road Trip/cover.jpg
 
-Each song is tagged with the playlist's name as its album, `Playlists` as its album artist (so **Library → Artists** lists one *Playlists* artist holding them all), and its place in the playlist as its track number. Each song keeps its own cover, so Now Playing shows the song's; the playlist's cover is saved beside them as `cover.jpg`, which Q2 Pod shows for the album in Coverflow and Albums (Q2 Pod with folder covers first for albums). A song on a playlist and on an album you downloaded is on the card twice, once in each. A hidden `.q2-playlist` file names the playlist, so a renamed playlist keeps its folder.
+Each song is tagged with the playlist's name as its album, `Playlists` as its album artist (so **Library → Artists** lists one *Playlists* artist holding them all), and its place in the playlist as its track number. Each song keeps its own cover, so Now Playing shows the song's; the playlist's cover is saved beside them as `cover.jpg`, which Q2 Pod shows for the album in Coverflow and Albums (group-a-study's Q2 Pod test builds from 4 November 2026 on; others show the first song's cover there). A song on a playlist and on an album you downloaded is on the card twice, once in each. A hidden `.q2-playlist` file names the playlist, so a renamed playlist keeps its folder.
 
 ## Stream or download
 
