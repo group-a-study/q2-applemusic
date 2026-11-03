@@ -1,0 +1,222 @@
+Shanling Q2 tools
+=================
+
+The Q2 runs Linux 5.10 on an Ingenic X2000 (MIPS32r2, nan2008) with glibc 2.28, no IPv6 and no CA
+bundle. q2-applemusic runs from the card's .applemusic folder as a Q2 Pod card app (q2-pod's
+patch/addon.c): Q2 Pod lists it in Streaming, starts it from that row, draws its page and keeps the
+Q2 awake while it downloads. Nothing is flashed for it.
+
+  build.sh     static Go for the Q2 and the card files, in target/shanlingq2/.applemusic, zipped as
+               target/shanlingq2/q2-applemusic-vX.Y-SHA.zip (unzip that at the card's root)
+  package.py   checks the binary (static, MIPS32 little-endian, soft-float ABI), sets the nan2008
+               ELF flag the Q2's kernel requires and Go doesn't, and writes the ZIP
+  launcher.sh  installed as .applemusic/run: q2-applemusic copied to /tmp and run there in a
+               restart loop
+  q2app        installed as .applemusic/q2app: the card app manifest (name=Apple Music,
+               search=Search Apple Music)
+  icon.png, icon-40.png
+               installed beside it: Streaming's row icon, 52 px (Legacy) and 40 px (iPod), a white
+               note on Apple Music's red, in Q2 Pod's style
+  test_launcher.py
+               runs launcher.sh on the host with a fake app
+
+Install
+-------
+
+Q2 Pod's System settings -> Apps installs the latest release over Wi-Fi. By hand, unzip
+q2-applemusic-*.zip from https://github.com/group-a-study/q2-applemusic/releases/latest to the
+card's root with the Q2 powered off. See the top-level README.md.
+
+Build
+-----
+
+  contrib/shanlingq2/build.sh [OUT]
+
+Go 1.22 or later and python3. The binary is CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat,
+static, so it needs none of the Q2's libraries and the firmware's -mfp64 doesn't matter. It uses Go's
+standard library alone. Tests: go test ./... (a fake Apple behind the HTTP transport) and
+python3 contrib/shanlingq2/test_launcher.py. A tag q2-vX.Y matching cmd/q2-applemusic/main.go's
+version publishes the release (.github/workflows/release.yml); System settings -> Apps takes its
+only ZIP.
+
+Device
+------
+
+Q2 Pod runs /bin/sh /mnt/mmc/.applemusic/run when Streaming's Apple Music row is pressed and it
+isn't running. The launcher copies q2-applemusic and itself to /tmp and leaves the card at once, so
+USB storage can always take the card; the loop restarts it after a failure, waiting 5 s and doubling
+to a minute, runs it at nice 10 (playback and the Q2's pages first), and leaves its pid in
+/tmp/q2-applemusic. A TERM to it ends q2-applemusic cleanly: the song under way is dropped (its
+.part files removed) and the queue saved; one still there 15 s later is killed. Q2 Pod sends it for
+Stop Streaming Services, Home's Rockbox row, an Apps update or remove, and USB storage (after which
+it starts it again). With nothing to download and its page unused for 15 minutes, q2-applemusic
+stops by itself; a stream session waiting for the Q2 to play on keeps it going (for an hour without
+the Q2 moving on). It writes no log.
+
+  /tmp/q2-applemusic.state
+      hold=1 while a song downloads or streams in (Q2 Pod holds standby off) and version; while not
+      signed in with a subscription, also the sign-in page's addr, pin, qr, qrsize and note, for Q2
+      Pod's QR code page
+  /tmp/q2-applemusic.sock
+      datagrams: q quits
+  /tmp/q2-applemusic.browse.sock
+      Q2SPOT/1 (q2-pod's docs/librespot.md) for the Q2's page, below
+  /tmp/q2-applemusic.play, /tmp/q2-applemusic.playing
+      Stream mode (below): "<seq> <folder>", the session Q2 Pod plays; and the path of the song it
+      plays from it, which Q2 Pod writes
+  port 8100 (the next free one if taken)
+      the sign-in page: /?k=KEY signs a browser in (the key is the QR code's, new each start),
+      POST /api/login takes the PIN, POST /api/token checks and saves a media-user-token (the value,
+      a Cookie header or a cookies.txt), POST /api/signout removes it; posts need the header X-Q2: 1
+  .applemusic/media-user-token, .applemusic/organize, .applemusic/mode, .applemusic/queue.json,
+  .applemusic/bulk.json
+      the sign-in, Organize Files (on, off), Mode (download, stream), the songs waiting and
+      Download All's lists to go; updates keep them
+  .applemusic/devtoken
+      the web player's developer token, read from music.apple.com's script and kept until it
+      expires or Apple refuses it
+  .applemusic/device.wvd
+      optional: a Widevine device (pywidevine's .wvd) to use instead of the built-in one
+  .applemusic/stream/<seq>/
+      Stream mode's songs, none kept past the next session
+
+The media-user-token is the account's sign-in: treat it like a password. One line in
+.applemusic/media-user-token, put there by hand, works too. It lasts months; when Apple refuses it
+(403 on the account), the page asks to sign in again. Apple not answering at all is told apart from
+a refused token (apple.IsNoNetwork, apple.ErrSignedOut), so a dropped Wi-Fi never asks for a new one.
+A refused developer token (401) is read again from music.apple.com once, then the request retried.
+
+HTTPS is checked against Mozilla's CA bundle, which the app carries (internal/tlsroots, from curl's
+conversion); the firmware has none. On a Q2 whose clock was never set, certificates are checked at
+the time a plain HTTP Date header gives.
+
+The page
+--------
+
+Each row's kind says what a press does (q2-pod's patch/addon.c): list opens a level, action sends an
+op and toasts its reply, search opens the Q2's keyboard, remote opens the QR code, local plays from
+the card (a song: its folder from it; a folder ending /: its songs listed; context album: in track
+order), info does nothing. A row's position is the op Play/Pause held sends.
+
+  menu
+      Downloaded Songs, Recently Added, Songs, Playlists, Albums, Artists, Search Apple Music,
+      Downloads, Mode, Organize Files, Account, Stop Apple Music; signed out, Sign In from Your
+      Phone. From the sign-in as last found (it never waits on Apple); refresh
+  recent, playlists, albums, artists
+      list rows: tracks <list> (Play/Pause held: download <list>), or artist <id>; playlists and
+      albums start with Download All Playlists / Download All Albums (bulk playlists|albums)
+  artist <id>
+      a library artist's (r.…) albums in the library; a catalogue artist's Top Songs, then its
+      albums, singles and EPs
+  tracks <list>
+      Download All (or All on the card; in Stream mode Play All, stream <list>, first), then each
+      song: local when on the card, else download <list>#<id>, or in Stream mode stream
+      <list>#<id> (Play/Pause held still downloads); refresh
+  search <term>, found <kind>:<term>
+      songs, albums, artists and playlists of one catalogue search, 25 each, kept two minutes
+  download <list> or <list>#<id>
+      queues the list's songs not on the card (or that one); its message says how many
+  bulk albums|playlists
+      Download All: every library album or playlist, queued one list at a time (Downloads, below)
+  stream <list> or <list>#<id>
+      plays the list from its first song (or that one) in a new stream session
+  downloads
+      the queue; cancel <key>, cancelall, retry [<key>], clearfailed, bulkstop
+  cardartists, cardalbums <artist>
+      Downloaded Songs with Artist/Album folders on the card: the songs in Apple Music/ itself
+      (Unsorted Songs), then each artist's folder, Playlists among them; an artist's albums,
+      oldest first, each a local folder row with context album
+  mode, organize, account, signout, stop
+      Mode download or stream; Organize Files on or off; the account (subscription, country) and
+      Sign Out; the token removed; the app stopped
+
+Lists of songs are named songs (the library's), chart, album:<id> (l.… a library album, its songs
+in the library; else the catalogue's), playlist:<id> (p.… a library playlist; pl.… the
+catalogue's), artisttop:<id> and search:<term>; they are fetched whole (Apple's pages of 100,
+following each page's next, at most 5,000 songs) and kept two minutes, so a download takes the
+songs as the page showed them. A library song is its catalogue song (playParams.catalogId); one
+with none (uploaded to the library) is left out. Cursors are offsets, read from a request's last
+argument. A request waits at most 8 s for its list (Q2 Pod waits 15 s): a list still coming answers
+one info row, Loading..., with the message refresh, so the page asks again every 2 s while the one
+fetch carries on; a list past its two minutes is shown as kept while it is fetched again. At most
+two fetches run at once.
+
+Downloads
+---------
+
+As gamdl's aac-web: for each song, the playback service (webPlayback, salableAdamId) gives its
+tags (the asset's metadata: title, artists, album, numbers, date, genre, composer, copyright, the
+explicit flag) and its AAC 256 kbps stream (flavor 28:ctrp256), an HLS playlist of one fragmented
+MP4 in byte ranges, joined into one request (a dropped connection resumed with a range; one silent
+for a minute dropped and resumed). Its samples are encrypted with CENC (AES-CTR, an IV each, in
+senc): the first fragments' sample description (the first seconds) with Apple's fixed prefetch
+key, the rest's with the song's, whose key ID the playlist's Widevine EXT-X-KEY names (not the
+default one, skd's s1/e1, which every playlist lists first). internal/widevine asks for that key: a
+signed license request (pywidevine's format: the device's client identification in the clear,
+RSASSA-PSS with SHA-1) to acquireWebPlaybackLicense, whose license's session key (RSA-OAEP) and
+the keys derived from it (AES-CMAC, as OEMCrypto) check its HMAC and unwrap the content key. Each
+sample description takes the key its tenc names (or, as gamdl, the prefetch key for the first of
+two). The stream is fetched to <name>.m4a.enc.part beside its name, then each sample decrypted
+into <name>.m4a.part: ftyp M4A, a moov (the stream's mvhd, tkhd, mdhd and hdlr with the real
+duration, its edit list for the encoder's priming, one sample description as mp4a with no sinf,
+stts, stsc, stsz and stco in chunks of 44 samples, about a second each, as iTunes writes them),
+then one mdat; renamed into place. A stream over 48 kHz, which iPods skip on, is refused (Apple's
+web stream is 44.1 kHz). The tags are iTunes atoms in moov/udta/meta/ilst (©nam, ©ART, aART, ©alb,
+©gen, ©day, ©wrt, cprt, trkn, disk, cpil, rtng, cnID, stik, covr, ©lyr), as TagLib reads them: the
+cover (600 px JPEG), and the lyrics when Apple has them (catalog songs/<id>/lyrics, TTML): timed by
+line, as LRC, "[01:03.01]A line" a line; else the plain text, a blank line between verses. Q2 Pod
+shows them in Now Playing. One song downloads at a time, two seconds apart. Offline, signed out,
+without a subscription or with the card away, the queue waits and tries again every 30 s.
+
+Download All (bulk albums|playlists): the library's albums or playlists, as the page listed them,
+go in .applemusic/bulk.json. Once no song waits, the next list's songs are fetched and queued (a
+list gone from the library is skipped), so Apple is asked for one list at a time and the queue
+stays one album long. Downloads says how many lists are left; Stop Download All drops them, the
+songs queued still downloading.
+
+A playlist's songs (playlist:<id>, however downloaded) are kept as an album of their own, in
+Apple Music/Playlists/<playlist>/, "07 - Title [id].m4a" by the song's place in the playlist:
+tagged with the playlist's name as their album, Playlists as their album artist, that place as
+their number (of the playlist's length), and as a compilation; each keeps its own cover. The
+folder holds the playlist's cover as cover.jpg (600 px), Q2 Pod's picture for the album in
+Coverflow and Albums, and .q2-playlist, its id and the album's name: a playlist renamed since
+keeps its folder and album; another playlist of the same name gets "<name> (2)". A song is on the
+card once per album it was downloaded into: the queue knows a playlist's songs by the playlist and
+the song (pp.…:<id>), other songs by the song.
+
+Organize Files on (the default, .applemusic/organize missing or anything but "off"): a song goes
+in Apple Music/<album artist>/<year> - <album>/ as "07 - Title [id].m4a" (the year first, so an
+artist's albums sort oldest first wherever they are listed by name; an album without a year, its
+title alone): "2-07 - ..." on an album of more than one disc, three digits on an album of 100
+tracks or more, so a folder's names sort in track order. Names are cut to 180 bytes and folders to
+100, and the characters a FAT card refuses (< > : " / \ | ? * and control characters, a trailing
+dot or space) are replaced. Off: every song in Apple Music/ itself as "Title - Artist [id].m4a".
+
+Either way the [id] at the end of a name is how q2-applemusic knows a song is on the card: it reads
+Apple Music/ and the folders under it (hidden ones skipped) at its start, and again when the page
+asks for a list a minute or more after the last read, so songs moved by hand within Apple Music/
+are found.
+
+The song under way is counted in queue.json before it starts and the count taken back when it
+returns, so only a death of q2-applemusic under way (killed, out of memory, a crash) leaves it
+counted: one counted three times goes to the failed songs ("it stopped Apple Music each time")
+instead of first again after every restart. The temp files an interrupted download left are swept
+when q2-applemusic starts.
+
+Stream mode
+-----------
+
+Mode: Stream (.applemusic/mode "stream"; Download is the default): a press on a song plays it and
+the rest of its list after it, Play All the list from its start, and nothing is kept in Apple Music/.
+A session is a folder, .applemusic/stream/<seq>/ (seq: the start's time in ms), holding the list's
+songs from the pressed one, at most 200, named in play order ("01 - Title [id].m4a", three digits
+for 100 or more), each fetched, decrypted and tagged as a download is (a song already downloaded is
+copied from Apple Music/ instead). /tmp/q2-applemusic.play names the session, "<seq> <folder>". Q2
+Pod plays the folder from its first song once one is there, adds each later song to the end of that
+queue as it comes, and writes the path of the song playing to /tmp/q2-applemusic.playing. The
+session fetches up to two songs past that one, then waits for the Q2 to move on, deleting songs more
+than five before the one playing; it ends after an hour without the Q2 moving on. A new session
+first moves in the old sessions' songs it needs, renamed, and deletes the old ones. A song Apple
+won't send is left out; one that fails for the network is tried again (every 5 s, up to five
+times). .applemusic is a hidden folder, which Q2 Pod's library scan skips, so streamed songs never
+join the Library.

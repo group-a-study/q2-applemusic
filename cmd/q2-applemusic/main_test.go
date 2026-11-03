@@ -1,0 +1,431 @@
+package main
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/group-a-study/q2-applemusic/internal/apple"
+	"github.com/group-a-study/q2-applemusic/internal/mp4"
+	"github.com/group-a-study/q2-applemusic/internal/mp4/mp4test"
+	"github.com/group-a-study/q2-applemusic/internal/q2"
+	"github.com/group-a-study/q2-applemusic/internal/q2spot"
+	"github.com/group-a-study/q2-applemusic/internal/widevine"
+)
+
+// fakeApple answers for music.apple.com, the AMP API and the playback service: a library of two
+// albums (three songs) and a playlist, each song's stream encrypted as Apple's web AAC is, its key
+// from a real Widevine license.
+type fakeApple struct {
+	*httptest.Server
+	t      *testing.T
+	mu     sync.Mutex
+	asked  []string // the AMP and playback paths asked, in order
+	active bool
+	token  string // the media-user-token it takes
+}
+
+const devToken = "eyJhbGciOiJFUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln"
+
+var songKey = []byte("the-song-key-016")
+
+// sample is song id's i-th sample, its bytes in the clear.
+func sample(id string, i int) []byte { return bytes.Repeat([]byte(id[len(id)-1:]), 100+i) }
+
+func plain(id string) []byte {
+	var b []byte
+	for i := 0; i < 50; i++ {
+		b = append(b, sample(id, i)...)
+	}
+	return b
+}
+
+func stream(id string) []byte {
+	var ss [][]byte
+	for i := 0; i < 50; i++ {
+		ss = append(ss, sample(id, i))
+	}
+	return mp4test.Fragmented(ss, [][]byte{prefetch, songKey},
+		[][]byte{[]byte("\x00\x00\x00\x00\x00\x00\x00\x00s1/e1   "), bytes.Repeat([]byte{0xab}, 16)}, 20, 0, mp4test.ESDS)
+}
+
+var prefetch = []byte{0x32, 0xb8, 0xad, 0xe1, 0x76, 0x9e, 0x26, 0xb1, 0xff, 0xb8, 0x98, 0x63, 0x52, 0x79, 0x3f, 0xc6}
+
+type song struct {
+	id, name, artist, album string
+	track, tracks           int
+}
+
+var songs = map[string]song{
+	"101": {"101", "Tears in the Typing Pool", "Broadcast", "Tender Buttons", 1, 2},
+	"102": {"102", "Valerie", "Broadcast", "Tender Buttons", 2, 2},
+	"103": {"103", "Spell Blue", "Broadcast", "Berberian Sound Studio", 1, 1},
+	"104": {"104", "Pendulum", "Broadcast", "Ha Ha Sound", 4, 12},
+}
+
+func res(typ, id string, attrs map[string]any) map[string]any {
+	return map[string]any{"id": id, "type": typ, "attributes": attrs}
+}
+
+// artBase is where the fake's covers are.
+var artBase string
+
+func songRes(s song, library bool) map[string]any {
+	pp := map[string]any{"id": s.id, "kind": "song"}
+	typ, id := "songs", s.id
+	if library {
+		pp = map[string]any{"id": "i." + s.id, "kind": "song", "isLibrary": true, "catalogId": s.id}
+		typ, id = "library-songs", "i."+s.id
+	}
+	return res(typ, id, map[string]any{"name": s.name, "artistName": s.artist, "albumName": s.album,
+		"trackNumber": s.track, "releaseDate": "2005-09-19", "playParams": pp,
+		"artwork": map[string]any{"url": artBase + "/ART/song" + s.id + "/{w}x{h}bb.jpg"}})
+}
+
+func newFakeApple(t *testing.T) *fakeApple {
+	f := &fakeApple{t: t, active: true, token: "MUT" + strings.Repeat("x", 100)}
+	mux := http.NewServeMux()
+	f.Server = httptest.NewServer(mux)
+	artBase = f.URL
+	data := func(w http.ResponseWriter, items ...map[string]any) {
+		json.NewEncoder(w).Encode(map[string]any{"data": items})
+	}
+	signed := func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			f.mu.Lock()
+			f.asked = append(f.asked, r.Method+" "+r.URL.Path)
+			tok := f.token
+			f.mu.Unlock()
+			if r.Header.Get("Authorization") != "Bearer "+devToken {
+				w.WriteHeader(401)
+				return
+			}
+			if r.Header.Get("Media-User-Token") != tok {
+				w.WriteHeader(403)
+				return
+			}
+			h(w, r)
+		}
+	}
+	mux.HandleFunc("/us/browse", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<html><script type="module" src="/assets/index~a1b2c3.js"></script></html>`)
+	})
+	mux.HandleFunc("/assets/index~a1b2c3.js", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `var x="%s";`, devToken)
+	})
+	mux.HandleFunc("/v1/me/account", signed(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		active := f.active
+		f.mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]any{"meta": map[string]any{"subscription": map[string]any{"active": active, "storefront": "au"}}})
+	}))
+	mux.HandleFunc("/v1/me/library/albums", signed(func(w http.ResponseWriter, r *http.Request) {
+		data(w, res("library-albums", "l.a1", map[string]any{"name": "Tender Buttons", "artistName": "Broadcast"}),
+			res("library-albums", "l.a2", map[string]any{"name": "Berberian Sound Studio", "artistName": "Broadcast"}))
+	}))
+	mux.HandleFunc("/v1/me/library/albums/l.a1/tracks", signed(func(w http.ResponseWriter, r *http.Request) {
+		data(w, songRes(songs["101"], true), songRes(songs["102"], true))
+	}))
+	mux.HandleFunc("/v1/me/library/albums/l.a2/tracks", signed(func(w http.ResponseWriter, r *http.Request) {
+		data(w, songRes(songs["103"], true))
+	}))
+	mux.HandleFunc("/v1/me/library/playlists", signed(func(w http.ResponseWriter, r *http.Request) {
+		data(w, res("library-playlists", "p.road", map[string]any{"name": "Road Trip"}))
+	}))
+	mux.HandleFunc("/v1/me/library/playlists/p.road", signed(func(w http.ResponseWriter, r *http.Request) {
+		data(w, res("library-playlists", "p.road", map[string]any{"name": "Road Trip",
+			"artwork": map[string]any{"url": f.URL + "/ART/road/{w}x{h}bb.jpg"}}))
+	}))
+	mux.HandleFunc("/v1/me/library/playlists/p.road/tracks", signed(func(w http.ResponseWriter, r *http.Request) {
+		// One page of one song, then the next: next pages are followed.
+		if r.URL.Query().Get("offset") == "" {
+			json.NewEncoder(w).Encode(map[string]any{"data": []any{songRes(songs["104"], false)},
+				"next": "/v1/me/library/playlists/p.road/tracks?offset=1"})
+			return
+		}
+		data(w, songRes(songs["102"], true))
+	}))
+	mux.HandleFunc("/v1/catalog/au/songs/", signed(func(w http.ResponseWriter, r *http.Request) {
+		ttml := `<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="1.5" end="3">First line</p>` +
+			`<p begin="00:03.250" end="5">Second <span>line</span></p></div></body></tt>`
+		data(w, res("lyrics", "1", map[string]any{"ttml": ttml}))
+	}))
+	mux.HandleFunc("/webPlayback", signed(func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ SalableAdamId string }
+		json.NewDecoder(r.Body).Decode(&body)
+		s := songs[body.SalableAdamId]
+		json.NewEncoder(w).Encode(map[string]any{"songList": []any{map[string]any{"assets": []any{
+			map[string]any{"flavor": "32:ctrp64", "URL": f.URL + "/hls/nope.m3u8"},
+			map[string]any{"flavor": "28:ctrp256", "URL": f.URL + "/hls/" + s.id + ".m3u8", "metadata": map[string]any{
+				"itemName": s.name, "artistName": s.artist, "playlistName": s.album, "playlistArtistName": s.artist,
+				"trackNumber": s.track, "trackCount": s.tracks, "discNumber": 1, "discCount": 1,
+				"releaseDate": "2005-09-19T07:00:00Z", "genre": "Electronic", "explicit": 0}}}}}})
+	}))
+	mux.HandleFunc("/hls/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimSuffix(strings.TrimSuffix(filepath.Base(r.URL.Path), ".m3u8"), ".mp4")
+		if strings.HasSuffix(r.URL.Path, ".mp4") {
+			http.ServeContent(w, r, "s.mp4", time.Time{}, bytes.NewReader(stream(id)))
+			return
+		}
+		b := stream(id)
+		kid := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xab}, 16))
+		fmt.Fprintf(w, "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MAP:URI=\"%s.mp4\",BYTERANGE=\"%d@0\"\n", id, 600)
+		fmt.Fprintf(w, "#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,KEYFORMAT=\"urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed\",KEYFORMATVERSIONS=\"1\",URI=\"%s\"\n",
+			"data:text/plain;base64,AAAAOHBzc2gAAAAA7e+LqXnWSs6jyCfc1R0h7QAAABgSEAAAAAAAAAAAczEvZTEgICBI88aJmwY=")
+		fmt.Fprintf(w, "#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,KEYFORMAT=\"urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed\",KEYFORMATVERSIONS=\"1\",URI=\"data:text/plain;base64,%s\"\n", kid)
+		fmt.Fprintf(w, "#EXTINF:5,\n#EXT-X-BYTERANGE:%d@600\n%s.mp4\n#EXT-X-ENDLIST\n", len(b)-600, id)
+	})
+	mux.HandleFunc("/acquireWebPlaybackLicense", signed(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body)
+		ch, _ := base64.StdEncoding.DecodeString(body["challenge"].(string))
+		lic, err := widevine.License(widevine.Builtin(), ch, []widevine.Key{{ID: bytes.Repeat([]byte{0xab}, 16), Key: songKey}})
+		if err != nil {
+			t.Errorf("license: %v", err)
+			json.NewEncoder(w).Encode(map[string]any{"status": -1})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"status": 0, "license": base64.StdEncoding.EncodeToString(lic)})
+	}))
+	mux.HandleFunc("/ART/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "\xff\xd8\xff"+r.URL.Path)
+	})
+	t.Cleanup(f.Close)
+	return f
+}
+
+// rig is a daemon on a card in a temp folder, signed in, talking to f.
+func rig(t *testing.T, f *fakeApple) *daemon {
+	t.Helper()
+	apple.HomeURL, apple.AMPURL, apple.PlayURL = f.URL, f.URL, f.URL
+	transport = func() http.RoundTripper { return http.DefaultTransport }
+	cardReady = func() bool { return true }
+	gap, retryIn, answerIn = 0, 50*time.Millisecond, 10*time.Second
+	signinPort = 0
+	card := t.TempDir()
+	q2.Card = card
+	dir := filepath.Join(card, ".applemusic")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, tokenFile), []byte(f.token+"\n"), 0o600)
+	tmp := t.TempDir()
+	d := start(dir, filepath.Join(card, "Apple Music"), filepath.Join(tmp, "q2-applemusic.state"),
+		filepath.Join(tmp, "browse.sock"), filepath.Join(tmp, "ctl.sock"))
+	done := make(chan struct{})
+	go func() { d.run(); close(done) }()
+	t.Cleanup(func() { d.shutdown(); <-done })
+	until(t, "the sign-in", func() bool { return d.authState() == authOK })
+	return d
+}
+
+func until(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	for end := time.Now().Add(10 * time.Second); !ok(); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+}
+
+func ask(d *daemon, op string, args ...string) q2spot.Reply {
+	return d.device(q2spot.Request{ID: "1", Op: op, Args: args})
+}
+
+func titles(r q2spot.Reply) []string {
+	var out []string
+	for _, row := range r.Rows {
+		out = append(out, row.Title)
+	}
+	return out
+}
+
+// tags is the M4A's tags (mp4.ReadTags) and its samples, checked to be song id's in the clear.
+func song4a(t *testing.T, path, id string) map[string]string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasSuffix(b, plain(id)) {
+		t.Errorf("%s: the samples aren't %s's in the clear", filepath.Base(path), id)
+	}
+	return mp4.ReadTags(b)
+}
+
+func TestDownloadAllAlbums(t *testing.T) {
+	f := newFakeApple(t)
+	d := rig(t, f)
+	r := ask(d, "albums")
+	if got := titles(r); len(got) != 3 || got[0] != "Download All Albums" || r.Rows[0].Subtitle != "All 2 albums in your library" {
+		t.Fatalf("albums: %q %q", got, r.Rows[0].Subtitle)
+	}
+	if r := ask(d, "bulk", "albums"); r.Message != "Downloading all 2 albums" {
+		t.Fatalf("bulk: %+v", r)
+	}
+	root := filepath.Join(q2.Card, "Apple Music", "Broadcast")
+	a := filepath.Join(root, "2005 - Tender Buttons", "02 - Valerie [102].m4a")
+	b := filepath.Join(root, "2005 - Berberian Sound Studio", "01 - Spell Blue [103].m4a")
+	until(t, "both albums", func() bool {
+		_, e1 := os.Stat(a)
+		_, e2 := os.Stat(b)
+		return e1 == nil && e2 == nil && !d.dl.pending()
+	})
+	tg := song4a(t, a, "102")
+	for k, v := range map[string]string{"\xa9nam": "Valerie", "\xa9alb": "Tender Buttons", "aART": "Broadcast",
+		"trkn": "2/2", "\xa9day": "2005-09-19", "\xa9lyr": "[00:01.50]First line\n[00:03.25]Second line", "cnID": "102"} {
+		if tg[k] != v {
+			t.Errorf("tag %q = %q, want %q", k, tg[k], v)
+		}
+	}
+	if want := len("\xff\xd8\xff/ART/song102/600x600bb.jpg"); tg["covr"] != fmt.Sprint(want, " bytes") {
+		t.Errorf("cover %q", tg["covr"])
+	}
+	// One album's songs were asked for only once the one before was done.
+	f.mu.Lock()
+	asked := strings.Join(f.asked, "\n")
+	f.mu.Unlock()
+	if i, j := strings.Index(asked, "l.a2/tracks"), strings.LastIndex(asked, "POST /webPlayback"); i < 0 ||
+		strings.Count(asked[:i], "POST /webPlayback") != 2 || j < i {
+		t.Errorf("albums not one at a time:\n%s", asked)
+	}
+	if _, err := os.Stat(filepath.Join(d.dir, "bulk.json")); !os.IsNotExist(err) {
+		t.Error("bulk.json left behind")
+	}
+	if r := ask(d, "tracks", "album:l.a1"); r.Rows[0].Title != "All on the card" || r.Rows[1].Kind != "local" {
+		t.Errorf("album page: %+v", r.Rows)
+	}
+}
+
+func TestPlaylistAsAlbum(t *testing.T) {
+	f := newFakeApple(t)
+	d := rig(t, f)
+	r := ask(d, "playlists")
+	if got := titles(r); len(got) != 3 || got[1] != "Download All Playlists" {
+		t.Fatalf("playlists: %q", got)
+	}
+	r = ask(d, "tracks", "playlist:p.road")
+	if got := titles(r); len(got) != 3 || got[0] != "Download All" || got[1] != "Pendulum" || got[2] != "Valerie" ||
+		!strings.Contains(r.Rows[0].Subtitle, "kept as an album") {
+		t.Fatalf("playlist page: %q %q", got, r.Rows[0].Subtitle)
+	}
+	// Valerie on its album already: the playlist's album still gets its own copy.
+	if r := ask(d, "download", "album:l.a1#102"); r.Message != "Downloading" {
+		t.Fatalf("download: %+v", r)
+	}
+	until(t, "the album's song", func() bool { return !d.dl.pending() && d.dl.count() == 1 })
+	if r := ask(d, "bulk", "playlists"); r.Message != "Downloading 1 playlist" {
+		t.Fatalf("bulk: %+v", r)
+	}
+	dir := filepath.Join(q2.Card, "Apple Music", "Playlists", "Road Trip")
+	until(t, "the playlist", func() bool { return !d.dl.pending() && d.dl.count() == 3 })
+	one := song4a(t, filepath.Join(dir, "01 - Pendulum [104].m4a"), "104")
+	two := song4a(t, filepath.Join(dir, "02 - Valerie [102].m4a"), "102")
+	for _, c := range []struct {
+		tags      map[string]string
+		trkn, art string
+	}{{one, "1/2", "song104"}, {two, "2/2", "song102"}} {
+		if c.tags["\xa9alb"] != "Road Trip" || c.tags["aART"] != "Playlists" || c.tags["trkn"] != c.trkn || c.tags["cpil"] != "1" {
+			t.Errorf("playlist song tags %q", c.tags)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "cover.jpg")); string(b) != "\xff\xd8\xff/ART/road/600x600bb.jpg" {
+		t.Errorf("cover.jpg %q", b)
+	}
+	// Each song keeps its own cover.
+	b, _ := os.ReadFile(filepath.Join(dir, "01 - Pendulum [104].m4a"))
+	if !bytes.Contains(b, []byte("/ART/song104/600x600bb.jpg")) {
+		t.Error("the song's own cover isn't embedded")
+	}
+	if id, name := readMarker(dir); id != "p.road" || name != "Road Trip" {
+		t.Errorf("marker %q %q", id, name)
+	}
+	// The playlist's page and a fresh scan see its songs on the card, apart from the album's.
+	d.dl.rescan()
+	if r := ask(d, "tracks", "playlist:p.road"); r.Rows[0].Title != "All on the card" || r.Rows[0].URI != dir+"/" {
+		t.Errorf("playlist page after: %+v", r.Rows[0])
+	}
+	if r := ask(d, "cardalbums", "Playlists"); len(r.Rows) != 1 || r.Rows[0].Title != "Road Trip" || r.Rows[0].Context != "album" {
+		t.Errorf("Downloaded Songs → Playlists: %+v", r.Rows)
+	}
+}
+
+func TestBulkStop(t *testing.T) {
+	f := newFakeApple(t)
+	d := rig(t, f)
+	ask(d, "albums")
+	cardReady = func() bool { return false } // the card away: Download All waits, its lists kept
+	ask(d, "bulk", "albums")
+	until(t, "the queue to wait", func() bool { _, _, _, _, why := d.dl.snapshot(); return why == "The card is away" })
+	if left, total, _ := d.dl.bulkState(); left != 2 || total != 2 {
+		t.Fatalf("bulk state %d of %d", left, total)
+	}
+	if r := ask(d, "downloads"); !strings.Contains(strings.Join(titles(r), "|"), "Stop Download All") {
+		t.Fatalf("downloads page %q", titles(r))
+	}
+	if r := ask(d, "bulkstop"); !strings.HasPrefix(r.Message, "2 lists left out") {
+		t.Fatalf("bulkstop %+v", r)
+	}
+	if left, _, _ := d.dl.bulkState(); left != 0 || d.dl.pending() {
+		t.Fatal("still pending after Stop Download All")
+	}
+}
+
+func TestSignIn(t *testing.T) {
+	f := newFakeApple(t)
+	d := rig(t, f)
+	if got := titles(d.menu()); len(got) < 3 || got[1] != "Recently Added" {
+		t.Fatalf("menu %q", got)
+	}
+	// A token Apple refuses: the menu asks for a new sign-in, and the queue waits.
+	f.mu.Lock()
+	f.token = "another"
+	f.mu.Unlock()
+	os.WriteFile(filepath.Join(d.dir, tokenFile), []byte("MUT"+strings.Repeat("y", 100)), 0o600)
+	d.checkAuth()
+	if d.authState() != authExpired {
+		t.Fatalf("auth %d", d.authState())
+	}
+	if got := titles(d.menu()); got[0] != "Sign In Again from Your Phone" {
+		t.Fatalf("menu %q", got)
+	}
+	if r := ask(d, "albums"); r.Status != q2spot.Login {
+		t.Fatalf("albums while signed out: %+v", r)
+	}
+	kv := map[string]string{}
+	d.signin.fields(kv)
+	if kv["pin"] == "" || kv["note"] == "" {
+		t.Fatalf("QR page fields %q", kv)
+	}
+	if got := pastedToken("# Netscape\n.music.apple.com\tTRUE\t/\tTRUE\t0\tmedia-user-token\tAbC+/=\n"); got != "AbC+/=" {
+		t.Fatalf("token from cookies.txt %q", got)
+	}
+	if got := pastedToken("foo=1; media-user-token=XyZ; bar=2"); got != "XyZ" {
+		t.Fatalf("token from a Cookie header %q", got)
+	}
+}
+
+func TestNames(t *testing.T) {
+	if n := songName("1", `AC/DC: "Live"?`, 7, 12, 2, 2); n != "2-07 - AC_DC_ _Live__ [1]" {
+		t.Errorf("songName %q", n)
+	}
+	if n := albumFolderName("Tender Buttons.", "2005", "Unknown"); n != "2005 - Tender Buttons" {
+		t.Errorf("albumFolderName %q", n)
+	}
+	if n := flatName("9", "Song", "Artist"); n != "Song - Artist [9]" {
+		t.Errorf("flatName %q", n)
+	}
+	if !named.MatchString("01 - Song [123].m4a") || named.MatchString("cover.jpg") {
+		t.Error("named")
+	}
+	if !leftover.MatchString("01 - Song [1].m4a.enc.part") || !leftover.MatchString("x.m4a.part") {
+		t.Error("leftover")
+	}
+}
