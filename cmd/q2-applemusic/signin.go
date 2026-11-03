@@ -51,7 +51,7 @@ func (d *daemon) startSignin(port int) {
 	var l net.Listener
 	for p := port; p < port+10; p++ {
 		if ln, err := net.Listen("tcp4", fmt.Sprintf(":%d", p)); err == nil {
-			l, s.port = ln, p
+			l, s.port = ln, ln.Addr().(*net.TCPAddr).Port
 			break
 		}
 	}
@@ -142,15 +142,15 @@ func account(a *apple.Account) map[string]any {
 		"plan": "Subscription active · " + strings.ToUpper(a.Storefront)}
 }
 
-// tokenShape is what the media-user-token cookie looks like: a long run of base64 (validToken
-// checks its length).
-var tokenShape = regexp.MustCompile(`^[A-Za-z0-9+/=_-]+$`)
+// tokenShape is what the media-user-token cookie looks like: "0." and a long run of base64, as
+// Apple writes it now (validToken checks its length).
+var tokenShape = regexp.MustCompile(`^[A-Za-z0-9+/=_.-]+$`)
 
 func validToken(s string) bool { return len(s) >= 64 && len(s) <= 4096 && tokenShape.MatchString(s) }
 
 // cookieValue is the media-user-token in what was pasted: the value alone, a Cookie header, or a
 // cookies.txt file (tab-separated, the value last).
-var cookieValue = regexp.MustCompile(`media-user-token(?:=|\t)([A-Za-z0-9+/=_-]+)`)
+var cookieValue = regexp.MustCompile(`media-user-token(?:=|\t)([A-Za-z0-9+/=_.-]+)`)
 
 func pastedToken(s string) string {
 	s = strings.TrimSpace(s)

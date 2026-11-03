@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,8 +98,13 @@ func songRes(s song, library bool) map[string]any {
 		"artwork": map[string]any{"url": artBase + "/ART/song" + s.id + "/{w}x{h}bb.jpg"}})
 }
 
+// appleToken is a made-up media-user-token shaped as Apple's: "0.", then base64 with + / and =.
+func appleToken(fill string) string {
+	return "0.Ag" + strings.Repeat(fill, 200) + "+nA/UCN1vZ6y9rwRryGL7ooUJlZaUGPQed1qTfPLIyCg2k=="
+}
+
 func newFakeApple(t *testing.T) *fakeApple {
-	f := &fakeApple{t: t, active: true, token: "MUT" + strings.Repeat("x", 100), fail: map[string]int{}, plays: map[string]int{}}
+	f := &fakeApple{t: t, active: true, token: appleToken("x"), fail: map[string]int{}, plays: map[string]int{}}
 	mux := http.NewServeMux()
 	f.Server = httptest.NewServer(mux)
 	artBase = f.URL
@@ -425,7 +431,7 @@ func TestSignIn(t *testing.T) {
 	f.mu.Lock()
 	f.token = "another"
 	f.mu.Unlock()
-	os.WriteFile(filepath.Join(d.dir, tokenFile), []byte("MUT"+strings.Repeat("y", 100)), 0o600)
+	os.WriteFile(filepath.Join(d.dir, tokenFile), []byte(appleToken("y")), 0o600)
 	d.checkAuth()
 	if d.authState() != authExpired {
 		t.Fatalf("auth %d", d.authState())
@@ -441,11 +447,16 @@ func TestSignIn(t *testing.T) {
 	if kv["pin"] == "" || kv["note"] == "" {
 		t.Fatalf("QR page fields %q", kv)
 	}
-	if got := pastedToken("# Netscape\n.music.apple.com\tTRUE\t/\tTRUE\t0\tmedia-user-token\tAbC+/=\n"); got != "AbC+/=" {
-		t.Fatalf("token from cookies.txt %q", got)
+	tok := appleToken("z")
+	for _, pasted := range []string{tok, "  " + tok + "\n",
+		"# Netscape\n.music.apple.com\tTRUE\t/\tTRUE\t0\tmedia-user-token\t" + tok + "\n",
+		"foo=1; media-user-token=" + tok + "; bar=2"} {
+		if got := pastedToken(pasted); got != tok || !validToken(got) {
+			t.Fatalf("token from %q: %q", pasted, got)
+		}
 	}
-	if got := pastedToken("foo=1; media-user-token=XyZ; bar=2"); got != "XyZ" {
-		t.Fatalf("token from a Cookie header %q", got)
+	if validToken("0.short") || validToken(tok+" more") {
+		t.Fatal("a malformed token taken")
 	}
 }
 
@@ -521,4 +532,58 @@ func TestRetries(t *testing.T) {
 	if _, err := os.Stat(d.dl.failedFile); !os.IsNotExist(err) {
 		t.Error("failed.json still there")
 	}
+}
+
+// TestSignInPage signs in through the phone's page: the PIN, then a token pasted as Apple's look.
+func TestSignInPage(t *testing.T) {
+	f := newFakeApple(t)
+	d := rig(t, f)
+	os.Remove(filepath.Join(d.dir, tokenFile))
+	d.signOut()
+	page := "http://127.0.0.1:" + fmt.Sprint(d.signin.port)
+	jar := &cookieJar{}
+	c := &http.Client{Jar: jar}
+	post := func(path, body string) (int, string) {
+		req, _ := http.NewRequest(http.MethodPost, page+path, strings.NewReader(body))
+		req.Header.Set("X-Q2", "1")
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, fmt.Sprint(out["error"])
+	}
+	if code, _ := post("/api/login", `{"pin":"`+d.signin.pin+`"}`); code != 200 {
+		t.Fatalf("PIN refused: %d", code)
+	}
+	if code, msg := post("/api/token", `{"token":"0.short"}`); code != 400 {
+		t.Fatalf("a short token: %d %s", code, msg)
+	}
+	if code, msg := post("/api/token", `{"token":"`+f.token+`"}`); code != 200 {
+		t.Fatalf("Apple's token refused: %d %s", code, msg)
+	}
+	if b, _ := os.ReadFile(filepath.Join(d.dir, tokenFile)); strings.TrimSpace(string(b)) != f.token {
+		t.Fatal("the token isn't on the card")
+	}
+	until(t, "the sign-in", func() bool { return d.authState() == authOK })
+}
+
+// cookieJar keeps the sign-in page's cookie.
+type cookieJar struct {
+	mu sync.Mutex
+	cs []*http.Cookie
+}
+
+func (j *cookieJar) SetCookies(_ *url.URL, cs []*http.Cookie) {
+	j.mu.Lock()
+	j.cs = append(j.cs, cs...)
+	j.mu.Unlock()
+}
+
+func (j *cookieJar) Cookies(*url.URL) []*http.Cookie {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.cs
 }
