@@ -115,7 +115,8 @@ order), info does nothing. A row's position is the op Play/Pause held sends.
       Phone. From the sign-in as last found (it never waits on Apple); refresh
   recent, playlists, albums, artists
       list rows: tracks <list> (Play/Pause held: download <list>), or artist <id>; playlists and
-      albums start with Download All Playlists / Download All Albums (bulk playlists|albums)
+      albums start with Download All Playlists / Download All Albums (bulk playlists|albums), then
+      list the library's by its dateAdded, the last added first (undated last, by name)
   artist <id>
       a library artist's (r.…) albums in the library; a catalogue artist's Top Songs, then its
       albums, singles and EPs

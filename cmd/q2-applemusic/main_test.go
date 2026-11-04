@@ -841,3 +841,29 @@ func TestDedupe(t *testing.T) {
 		t.Error("two albums taken for one")
 	}
 }
+
+// TestNewestFirst: Albums and Playlists list the library's last added first, undated ones last
+// in Apple's order (by name), and Download All goes in that order.
+func TestNewestFirst(t *testing.T) {
+	f := newFakeApple(t)
+	album := func(id, name, added string) map[string]any {
+		attrs := map[string]any{"name": name, "artistName": "Broadcast"}
+		if added != "" {
+			attrs["dateAdded"] = added
+		}
+		return res("library-albums", id, attrs)
+	}
+	f.albums = []any{album("l.a3", "Ha Ha Sound", ""), album("l.a2", "Berberian Sound Studio", "2025-02-09T05:15:17Z"),
+		album("l.a4", "The Noise Made by People", ""), album("l.a1", "Tender Buttons", "2026-11-04T09:00:00Z")}
+	d := rig(t, f)
+	if got := strings.Join(titles(ask(d, "albums")), "|"); got != "Download All Albums|Tender Buttons|Berberian Sound Studio|Ha Ha Sound|The Noise Made by People" {
+		t.Errorf("albums %q", got)
+	}
+	l, err := d.cache.get("albums", nil)
+	if err != nil || len(l.lists) != 4 || l.lists[0].Ctx != "album:l.a1" || l.lists[1].Ctx != "album:l.a2" {
+		t.Errorf("Download All's order %+v %v", l.lists, err)
+	}
+	if !newer("2026-11-04T09:00:00Z", "2025-02-09T05:15:17Z") || newer("", "2025-02-09T05:15:17Z") || !newer("2025-02-09T05:15:17Z", "") || newer("", "") {
+		t.Error("newer")
+	}
+}

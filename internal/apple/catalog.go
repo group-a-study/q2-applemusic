@@ -48,8 +48,9 @@ type ListRef struct {
 
 type Album struct {
 	ID, Name, Artist, Year, Artwork string
-	Library                         bool // a library album (l.…), whose tracks are the library's
-	Songs                           int  // a library album's songs in the library, as its listing counts them
+	Library                         bool   // a library album (l.…), whose tracks are the library's
+	Songs                           int    // a library album's songs in the library, as its listing counts them
+	Added                           string // when a library album joined the library, as its listing dates it
 }
 
 type Artist struct {
@@ -61,6 +62,7 @@ type Playlist struct {
 	ID, Name, Curator, Artwork string
 	Library                    bool
 	Changed                    string // a library playlist's last change, as its listing dates it
+	Added                      string // when a library playlist joined the library
 }
 
 // SearchResults are a term's songs, albums, artists and playlists.
@@ -85,6 +87,7 @@ type resource struct {
 		ReleaseDate string `json:"releaseDate"`
 		TrackCount  int    `json:"trackCount"`       // a library album's
 		Modified    string `json:"lastModifiedDate"` // a library playlist's
+		Added       string `json:"dateAdded"`        // a library album's or playlist's
 		Artwork     *struct {
 			URL string `json:"url"`
 		} `json:"artwork"`
@@ -166,12 +169,12 @@ func tracks(rs []resource) []Track {
 
 func (r resource) album() Album {
 	return Album{ID: r.ID, Name: r.Attributes.Name, Artist: r.Attributes.ArtistName, Year: year(r.Attributes.ReleaseDate),
-		Artwork: r.artwork(), Library: strings.HasPrefix(r.Type, "library-"), Songs: r.Attributes.TrackCount}
+		Artwork: r.artwork(), Library: strings.HasPrefix(r.Type, "library-"), Songs: r.Attributes.TrackCount, Added: r.Attributes.Added}
 }
 
 func (r resource) playlist() Playlist {
 	return Playlist{ID: r.ID, Name: r.Attributes.Name, Curator: r.Attributes.CuratorName, Artwork: r.artwork(),
-		Library: strings.HasPrefix(r.Type, "library-"), Changed: r.Attributes.Modified}
+		Library: strings.HasPrefix(r.Type, "library-"), Changed: r.Attributes.Modified, Added: r.Attributes.Added}
 }
 
 // maxItems caps a list fetched whole (an account's library songs, a playlist).

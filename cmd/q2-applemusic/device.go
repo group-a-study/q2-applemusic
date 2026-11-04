@@ -693,9 +693,11 @@ func (d *daemon) download(am *apple.Client, arg string) q2spot.Reply {
 	return q2spot.Reply{Message: "Downloading " + plural(n, "song")}
 }
 
-// playlistsListing is the Playlists page: Top Charts, Download All, then the library's playlists.
+// playlistsListing is the Playlists page: Top Charts, Download All, then the library's playlists,
+// the last added first.
 func (d *daemon) playlistsListing(ctx context.Context, am *apple.Client) (listing, error) {
 	ps, err := am.LibraryPlaylists(ctx)
+	sort.SliceStable(ps, func(i, j int) bool { return newer(ps[i].Added, ps[j].Added) })
 	l := listing{rows: []q2spot.Row{open("chart", "Top Charts", "Apple Music's most played")}}
 	for _, p := range ps {
 		l.lists = append(l.lists, bulkList{Ctx: "playlist:" + p.ID, Name: p.Name, Changed: p.Changed})
@@ -710,9 +712,11 @@ func (d *daemon) playlistsListing(ctx context.Context, am *apple.Client) (listin
 	return l, err
 }
 
-// albumsListing is the Albums page: Download All, then the library's albums.
+// albumsListing is the Albums page: Download All, then the library's albums, the last added first
+// (Download All goes in that order too).
 func (d *daemon) albumsListing(ctx context.Context, am *apple.Client) (listing, error) {
 	as, err := am.LibraryAlbums(ctx)
+	sort.SliceStable(as, func(i, j int) bool { return newer(as[i].Added, as[j].Added) })
 	var l listing
 	for _, a := range as {
 		l.lists = append(l.lists, bulkList{Ctx: "album:" + a.ID, Name: a.Name, Artist: a.Artist, Songs: a.Songs})
@@ -727,6 +731,20 @@ func (d *daemon) albumsListing(ctx context.Context, am *apple.Client) (listing, 
 		l.rows = append(l.rows, albumRow(a))
 	}
 	return l, err
+}
+
+// newer is whether date a (a listing's dateAdded) is later than b; an undated one is the oldest, and
+// Apple's order (by name) stays among equals.
+func newer(a, b string) bool {
+	ta, ea := time.Parse(time.RFC3339, a)
+	tb, eb := time.Parse(time.RFC3339, b)
+	switch {
+	case ea != nil:
+		return false
+	case eb != nil:
+		return true
+	}
+	return ta.After(tb)
 }
 
 // bulk is Download All for the library's albums or playlists: each queued in turn (downloads.go
