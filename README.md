@@ -33,7 +33,8 @@ Apple Music's page has **Downloaded Songs**, **Recently Added**, **Songs** (your
 - Run **Library → Update Local Music** for your downloads to show in Artists, Albums and Coverflow too.
 - Each song is tagged with its lyrics when Apple has them: time-synced ones as LRC (`[01:03.01]A line`), shown in time in Now Playing, else the plain text.
 - Every song is AAC-LC 256 kbps (Apple's web stream, 44.1 kHz), in a plain M4A indexed as iTunes writes them, so it also plays on an iPod. A song at 48 kHz or more, which iPods skip on, is kept apart in `Apple Music/48khz/`, again as artist, album and song (`48khz/<artist>/<year> - <album>/`, a playlist's in `48khz/Playlists/<name>/`); **Downloaded Songs** lists them under **48 kHz and Higher**. With Apple's stream at 44.1 kHz, that folder is a safety net.
-- Your account's country (its storefront) decides what Apple licenses: a song it doesn't license there fails, saying so.
+- Your account's country (its storefront) decides what Apple licenses: a song it doesn't license there fails, saying so, and an album none of whose songs plays there says that.
+- A compilation in your library (a soundtrack, *Various Artists*) whose songs Apple matched to their own releases, as it does where the compilation itself isn't licensed, downloads as that one album: its name, *Various Artists* as album artist, its year and cover, your library's track numbers, in `Various Artists/<year> - <album>/`, so Coverflow shows one album, not one per song. A song on it and on its own album you downloaded is on the card in both; a copy an earlier version filed alone under its own album (v1.6 and before did) is removed once the compilation's is saved.
 
 ## Playlists are kept as albums
 

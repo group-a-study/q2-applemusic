@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -53,6 +55,47 @@ func albumFolderName(album, year, unknown string) string {
 }
 
 func isYear(s string) bool { return len(s) == 4 && strings.Trim(s, "0123456789") == "" }
+
+// albumKey is an album's title compared loosely: case, punctuation and spaces, editions in brackets
+// and " - EP" or " - Single" left out ("Friday Night Lights (Original Television Soundtrack)" is
+// "fridaynightlights").
+func albumKey(s string) string {
+	s = strings.ToLower(s)
+	for _, pair := range [][2]string{{"(", ")"}, {"[", "]"}} {
+		for {
+			i := strings.Index(s, pair[0])
+			j := strings.Index(s, pair[1])
+			if i < 0 || j < i {
+				break
+			}
+			s = s[:i] + s[j+1:]
+		}
+	}
+	for _, suffix := range []string{" - ep", " - single", " ep", " single"} {
+		s = strings.TrimSuffix(strings.TrimSpace(s), suffix)
+	}
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return r
+		}
+		return -1
+	}, s)
+}
+
+// sameAlbum is whether two titles name one album (albumKey's, or one within the other).
+func sameAlbum(a, b string) bool {
+	ka, kb := albumKey(a), albumKey(b)
+	if ka == "" || kb == "" {
+		return ka == kb
+	}
+	return ka == kb || strings.Contains(ka, kb) || strings.Contains(kb, ka)
+}
+
+// inAlbum is whether dir is an album folder of that title ("2008 - Friday Night Lights").
+func inAlbum(dir, title string) bool {
+	name, _ := albumYear(filepath.Base(dir))
+	return sameAlbum(name, title)
+}
 
 // songName is a song's file name without its extension: its number on the album (disc first, on an
 // album of several), its title and its id, "2-07 - Title [1440841363]"; without a number, just the

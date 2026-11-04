@@ -87,14 +87,19 @@ func res(typ, id string, attrs map[string]any) map[string]any {
 var artBase string
 
 func songRes(s song, library bool) map[string]any {
+	return songIn(s, library, s.album, s.track)
+}
+
+// songIn is a song as an album lists it: a library compilation names itself and the song's place in it.
+func songIn(s song, library bool, album string, track int) map[string]any {
 	pp := map[string]any{"id": s.id, "kind": "song"}
 	typ, id := "songs", s.id
 	if library {
 		pp = map[string]any{"id": "i." + s.id, "kind": "song", "isLibrary": true, "catalogId": s.id}
 		typ, id = "library-songs", "i."+s.id
 	}
-	return res(typ, id, map[string]any{"name": s.name, "artistName": s.artist, "albumName": s.album,
-		"trackNumber": s.track, "releaseDate": "2005-09-19", "playParams": pp,
+	return res(typ, id, map[string]any{"name": s.name, "artistName": s.artist, "albumName": album,
+		"trackNumber": track, "releaseDate": "2005-09-19", "playParams": pp,
 		"artwork": map[string]any{"url": artBase + "/ART/song" + s.id + "/{w}x{h}bb.jpg"}})
 }
 
@@ -143,6 +148,25 @@ func newFakeApple(t *testing.T) *fakeApple {
 	mux.HandleFunc("/v1/me/library/albums", signed(func(w http.ResponseWriter, r *http.Request) {
 		data(w, res("library-albums", "l.a1", map[string]any{"name": "Tender Buttons", "artistName": "Broadcast"}),
 			res("library-albums", "l.a2", map[string]any{"name": "Berberian Sound Studio", "artistName": "Broadcast"}))
+	}))
+	// Library albums with their catalogue album (include=catalog): Tender Buttons, and a compilation
+	// whose songs Apple matched to their own albums (the playback service names those).
+	withCatalog := func(id, name, artist, catName, date, art string) map[string]any {
+		a := res("library-albums", id, map[string]any{"name": name, "artistName": artist})
+		a["relationships"] = map[string]any{"catalog": map[string]any{"data": []any{res("albums", "9"+id, map[string]any{
+			"name": catName, "artistName": artist, "releaseDate": date,
+			"artwork": map[string]any{"url": f.URL + "/ART/" + art + "/{w}x{h}bb.jpg"}})}}}
+		return a
+	}
+	mux.HandleFunc("/v1/me/library/albums/l.a1", signed(func(w http.ResponseWriter, r *http.Request) {
+		data(w, withCatalog("l.a1", "Tender Buttons", "Broadcast", "Tender Buttons", "2005-09-19", "tb"))
+	}))
+	mux.HandleFunc("/v1/me/library/albums/l.fnl", signed(func(w http.ResponseWriter, r *http.Request) {
+		data(w, withCatalog("l.fnl", "Friday Night Lights", "Various Artists",
+			"Friday Night Lights (Original Television Soundtrack)", "2008-10-21", "fnl"))
+	}))
+	mux.HandleFunc("/v1/me/library/albums/l.fnl/tracks", signed(func(w http.ResponseWriter, r *http.Request) {
+		data(w, songIn(songs["104"], true, "Friday Night Lights", 1), songIn(songs["102"], true, "Friday Night Lights", 2))
 	}))
 	mux.HandleFunc("/v1/me/library/albums/l.a1/tracks", signed(func(w http.ResponseWriter, r *http.Request) {
 		data(w, songRes(songs["101"], true), songRes(songs["102"], true))
@@ -685,5 +709,58 @@ func TestStartsBeforeTheCardIsRead(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(d.dl.folder, "Broadcast", "2005 - Tender Buttons", "01 - Tears in the Typing Pool [101].m4a.part")); !os.IsNotExist(err) {
 		t.Fatal("the leftover .part wasn't swept")
+	}
+}
+
+// TestCompilation: a library compilation whose songs Apple matched to their own releases is one album,
+// Various Artists', not each song's own; an earlier copy alone in its own album's folder goes, one in a
+// fuller album stays, and an album whose songs are its own is filed as before.
+func TestCompilation(t *testing.T) {
+	f := newFakeApple(t)
+	d := rigWith(t, f, func(card string) {
+		dir := filepath.Join(card, "Apple Music", "Broadcast", "2009 - Ha Ha Sound") // as v1.6 filed it
+		os.MkdirAll(dir, 0o755)
+		os.WriteFile(filepath.Join(dir, "04 - Pendulum [104].m4a"), []byte("stray"), 0o644)
+	})
+	until(t, "the card read", d.dl.scannedYet)
+	ask(d, "tracks", "album:l.a1")
+	ask(d, "download", "album:l.a1")
+	until(t, "Tender Buttons", func() bool { return !d.dl.pending() && d.dl.count() == 3 })
+	tb := filepath.Join(d.dl.folder, "Broadcast", "2005 - Tender Buttons")
+	if _, err := os.Stat(filepath.Join(tb, "02 - Valerie [102].m4a")); err != nil {
+		t.Fatal("an album of its own songs isn't filed as before")
+	}
+	r := ask(d, "tracks", "album:l.fnl")
+	if got := titles(r); len(got) != 3 || got[1] != "Pendulum" || !strings.Contains(r.Rows[2].Subtitle, "") {
+		t.Fatalf("compilation page %q", got)
+	}
+	if r.Rows[1].Kind == "local" || r.Rows[2].Kind == "local" {
+		t.Fatalf("the compilation's songs count as on the card from other albums: %+v", r.Rows)
+	}
+	ask(d, "download", "album:l.fnl")
+	until(t, "the compilation", func() bool { return !d.dl.pending() && d.dl.count() >= 4 })
+	fnl := filepath.Join(d.dl.folder, "Various Artists", "2008 - Friday Night Lights")
+	for _, c := range []struct{ file, id, trkn string }{{"01 - Pendulum [104].m4a", "104", "1/2"}, {"02 - Valerie [102].m4a", "102", "2/2"}} {
+		tg := song4a(t, filepath.Join(fnl, c.file), c.id)
+		if tg["\xa9alb"] != "Friday Night Lights" || tg["aART"] != "Various Artists" || tg["trkn"] != c.trkn ||
+			tg["cpil"] != "1" || tg["\xa9day"] != "2008" || tg["\xa9ART"] != "Broadcast" {
+			t.Errorf("%s tags %q", c.file, tg)
+		}
+	}
+	b, _ := os.ReadFile(filepath.Join(fnl, "01 - Pendulum [104].m4a"))
+	if !bytes.Contains(b, []byte("/ART/fnl/600x600bb.jpg")) {
+		t.Error("the compilation's cover isn't embedded")
+	}
+	if _, err := os.Stat(filepath.Join(d.dl.folder, "Broadcast", "2009 - Ha Ha Sound")); !os.IsNotExist(err) {
+		t.Error("the stray copy's folder is still there")
+	}
+	if _, err := os.Stat(filepath.Join(tb, "02 - Valerie [102].m4a")); err != nil {
+		t.Error("a copy in a fuller album was removed")
+	}
+	if r := ask(d, "tracks", "album:l.fnl"); r.Rows[0].Title != "All on the card" || r.Rows[0].URI != fnl+"/" {
+		t.Errorf("compilation page after %+v", r.Rows[0])
+	}
+	if r := ask(d, "tracks", "album:l.a1"); r.Rows[0].Title != "All on the card" || r.Rows[0].URI != tb+"/" {
+		t.Errorf("Tender Buttons page after %+v", r.Rows[0])
 	}
 }

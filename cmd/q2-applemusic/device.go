@@ -226,6 +226,8 @@ func fail(err error) q2spot.Reply {
 		return q2spot.Fail(q2spot.Login, "Your Apple Music sign-in has expired: sign in again from your phone")
 	case apple.IsNoNetwork(err):
 		return q2spot.Fail(q2spot.Offline, "Apple Music can't be reached")
+	case errors.Is(err, apple.ErrNotPlayable):
+		return q2spot.Fail(q2spot.Unavailable, "None of it plays in your Apple Music country")
 	}
 	return q2spot.Fail(q2spot.Error, "Apple Music didn't answer")
 }
@@ -505,7 +507,18 @@ func (d *daemon) fetchTracks(ctx context.Context, am *apple.Client, list string)
 	case "chart":
 		return am.Charts(ctx)
 	case "album":
-		return am.AlbumTracks(ctx, id)
+		ts, err := am.AlbumTracks(ctx, id)
+		if err != nil {
+			return ts, err
+		}
+		if ref, err := am.AlbumContext(ctx, id); err == nil { // else filed by each song's own tags
+			ref.Count = len(ts)
+			for i := range ts {
+				r := ref
+				ts[i].InAlbum = &r
+			}
+		}
+		return ts, nil
 	case "artisttop":
 		return am.ArtistTop(ctx, id)
 	case "playlist":

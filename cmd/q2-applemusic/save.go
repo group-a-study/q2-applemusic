@@ -26,6 +26,8 @@ const hiresDir = "48khz"
 type spot struct {
 	dir, name, hires, tmp string
 	tags                  *mp4.Tags
+	cover                 string   // the cover's template, when not the song's own (its album's)
+	strays                []string // copies of it to delete once it is saved (place)
 }
 
 // fetchSong downloads a song: asked of the playback service, placed by at, its cover and lyrics
@@ -41,7 +43,13 @@ func (d *daemon) fetchSong(ctx context.Context, am *apple.Client, t apple.Track,
 	if err := os.MkdirAll(sp.tmp, 0o755); err != nil {
 		return "", err
 	}
-	sp.tags.Cover = am.Cover(ctx, t.Artwork, coverSize)
+	cover := t.Artwork
+	if sp.cover != "" {
+		cover = sp.cover
+	}
+	if sp.tags.Cover = am.Cover(ctx, cover, coverSize); sp.tags.Cover == nil && cover != t.Artwork {
+		sp.tags.Cover = am.Cover(ctx, t.Artwork, coverSize)
+	}
 	sp.tags.Lyrics = am.Lyrics(ctx, t.ID)
 	made := ""
 	where := func(rate int) (string, error) {
@@ -65,6 +73,12 @@ func (d *daemon) fetchSong(ctx context.Context, am *apple.Client, t apple.Track,
 			os.Remove(filepath.Dir(made))
 		}
 		return "", err
+	}
+	for _, p := range sp.strays {
+		if p != path && os.Remove(p) == nil {
+			os.Remove(filepath.Dir(p)) // only if empty, and its artist's
+			os.Remove(filepath.Dir(filepath.Dir(p)))
+		}
 	}
 	return path, nil
 }

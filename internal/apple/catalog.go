@@ -2,6 +2,7 @@ package apple
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -11,19 +12,32 @@ import (
 // Track is a song as a list shows it and the queue keeps it: its catalogue id (a library song's
 // catalogId), what its row says, and its cover's URL template.
 type Track struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Artist  string   `json:"artist,omitempty"`
-	Album   string   `json:"album,omitempty"`
-	Number  int      `json:"number,omitempty"`
-	Disc    int      `json:"disc,omitempty"`
-	Year    string   `json:"year,omitempty"`
-	Artwork string   `json:"art,omitempty"`
-	List    *ListRef `json:"list,omitempty"` // the playlist it is kept in as an album, if it is
+	ID      string    `json:"id"`
+	Name    string    `json:"name"`
+	Artist  string    `json:"artist,omitempty"`
+	Album   string    `json:"album,omitempty"`
+	Number  int       `json:"number,omitempty"`
+	Disc    int       `json:"disc,omitempty"`
+	Year    string    `json:"year,omitempty"`
+	Artwork string    `json:"art,omitempty"`
+	List    *ListRef  `json:"list,omitempty"`     // the playlist it is kept in as an album, if it is
+	InAlbum *AlbumRef `json:"in_album,omitempty"` // the album it was listed in (Number and Disc are its place there)
 }
 
 // ListRef is a playlist a song downloads into, kept as an album: its id, name and cover, and the
 // song's place in it.
+// AlbumRef is the album a song was listed in: a compilation in the library can hold songs Apple
+// matched to their own releases (a soundtrack not licensed in the country), which the song's tags
+// from the playback service then name instead (downloads.go place).
+type AlbumRef struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Artist string `json:"artist,omitempty"`
+	Year   string `json:"year,omitempty"`
+	Cover  string `json:"cover,omitempty"`
+	Count  int    `json:"count,omitempty"`
+}
+
 type ListRef struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
@@ -78,7 +92,8 @@ type resource struct {
 		} `json:"playParams"`
 	} `json:"attributes"`
 	Relationships struct {
-		Tracks *page `json:"tracks"`
+		Tracks  *page `json:"tracks"`
+		Catalog *page `json:"catalog"`
 	} `json:"relationships"`
 }
 
@@ -121,6 +136,18 @@ func (r resource) track() (Track, bool) {
 	}
 	return Track{ID: id, Name: a.Name, Artist: a.ArtistName, Album: a.AlbumName, Number: a.TrackNumber,
 		Disc: a.DiscNumber, Year: year(a.ReleaseDate), Artwork: r.artwork()}, true
+}
+
+// ErrNotPlayable is a list whose songs Apple lists, none of them playable in the account's country.
+var ErrNotPlayable = errors.New("none of its songs plays in your country")
+
+// playable is rs's songs, or ErrNotPlayable when it has songs and none plays.
+func playable(rs []resource) ([]Track, error) {
+	ts := tracks(rs)
+	if len(ts) == 0 && len(rs) > 0 {
+		return nil, ErrNotPlayable
+	}
+	return ts, nil
 }
 
 func tracks(rs []resource) []Track {
@@ -282,30 +309,77 @@ func (c *Client) RecentlyAdded(ctx context.Context) ([]Entry, error) {
 
 // AlbumTracks is an album's songs: a library album's in the library, a catalogue album's all.
 func (c *Client) AlbumTracks(ctx context.Context, id string) ([]Track, error) {
+	var rs []resource
+	var err error
 	if strings.HasPrefix(id, "l.") {
-		rs, err := c.all(ctx, library("/albums/"+url.PathEscape(id)+"/tracks", 100))
+		rs, err = c.all(ctx, library("/albums/"+url.PathEscape(id)+"/tracks", 100))
+	} else {
+		var u string
+		if u, err = c.catalog(ctx, "/albums/"+url.PathEscape(id)+"/tracks", url.Values{"limit": {"100"}}); err != nil {
+			return nil, err
+		}
+		rs, err = c.all(ctx, u)
+	}
+	if err != nil {
 		return tracks(rs), err
 	}
-	u, err := c.catalog(ctx, "/albums/"+url.PathEscape(id)+"/tracks", url.Values{"limit": {"100"}})
-	if err != nil {
-		return nil, err
+	return playable(rs)
+}
+
+// AlbumContext is an album as its songs are filed when they were matched to other releases: a library
+// album's name and artist, with its catalogue album's year and cover when it has one.
+func (c *Client) AlbumContext(ctx context.Context, id string) (AlbumRef, error) {
+	var u string
+	if strings.HasPrefix(id, "l.") {
+		u = AMPURL + "/v1/me/library/albums/" + url.PathEscape(id) + "?include=catalog"
+	} else {
+		var err error
+		if u, err = c.catalog(ctx, "/albums/"+url.PathEscape(id), nil); err != nil {
+			return AlbumRef{}, err
+		}
 	}
-	rs, err := c.all(ctx, u)
-	return tracks(rs), err
+	var p page
+	if err := c.call(ctx, http.MethodGet, u, nil, &p); err != nil {
+		return AlbumRef{}, err
+	}
+	if len(p.Data) == 0 {
+		return AlbumRef{}, &StatusError{Code: 404}
+	}
+	r := p.Data[0]
+	ref := AlbumRef{ID: id, Name: r.Attributes.Name, Artist: r.Attributes.ArtistName, Year: year(r.Attributes.ReleaseDate),
+		Cover: r.artwork()}
+	if cat := r.Relationships.Catalog; cat != nil && len(cat.Data) > 0 {
+		ca := cat.Data[0]
+		if y := year(ca.Attributes.ReleaseDate); y != "" {
+			ref.Year = y
+		}
+		if a := ca.artwork(); a != "" {
+			ref.Cover = a // the catalogue's template lasts; a library album's link expires in a day
+		}
+		if ref.Artist == "" {
+			ref.Artist = ca.Attributes.ArtistName
+		}
+	}
+	return ref, nil
 }
 
 // PlaylistTracks is a playlist's songs that are in the catalogue.
 func (c *Client) PlaylistTracks(ctx context.Context, id string) ([]Track, error) {
+	var rs []resource
+	var err error
 	if strings.HasPrefix(id, "p.") {
-		rs, err := c.all(ctx, library("/playlists/"+url.PathEscape(id)+"/tracks", 100))
+		rs, err = c.all(ctx, library("/playlists/"+url.PathEscape(id)+"/tracks", 100))
+	} else {
+		var u string
+		if u, err = c.catalog(ctx, "/playlists/"+url.PathEscape(id)+"/tracks", url.Values{"limit": {"100"}}); err != nil {
+			return nil, err
+		}
+		rs, err = c.all(ctx, u)
+	}
+	if err != nil {
 		return tracks(rs), err
 	}
-	u, err := c.catalog(ctx, "/playlists/"+url.PathEscape(id)+"/tracks", url.Values{"limit": {"100"}})
-	if err != nil {
-		return nil, err
-	}
-	rs, err := c.all(ctx, u)
-	return tracks(rs), err
+	return playable(rs)
 }
 
 // PlaylistInfo is a playlist's name and cover.

@@ -74,10 +74,14 @@ type item struct {
 	Attempt int         `json:"-"`               // the try under way now, from 1
 }
 
-// key is what a song is on the card as: its id, or in a playlist's album, the playlist's and its.
+// key is what a song is queued as: its id; in a playlist's album, the playlist's and its; listed in
+// an album, the album's and its (the same song in two albums is downloaded into each).
 func key(t apple.Track) string {
-	if t.List != nil {
+	switch {
+	case t.List != nil:
 		return "p" + t.List.ID + ":" + t.ID
+	case t.InAlbum != nil:
+		return "a" + t.InAlbum.ID + ":" + t.ID
 	}
 	return t.ID
 }
@@ -107,9 +111,9 @@ type downloads struct {
 	cancel    context.CancelFunc // the current download's
 	dropped   bool               // the current one removed from the queue, not stopped by a quit
 	failed    []*item
-	done      []*item           // this session's, oldest first
-	have      map[string]string // key: its file
-	ids       map[string]string // song id: a file of it, any
+	done      []*item             // this session's, oldest first
+	have      map[string]string   // key: its file
+	copies    map[string][]string // song id: its files but in playlists' albums
 	scanned   time.Time
 	read      chan struct{} // closed once the card was first read (firstScan)
 	scanning  atomic.Bool   // a read of the card under way
@@ -122,7 +126,7 @@ type downloads struct {
 
 func newDownloads(d *daemon, folder, file, bulkFile string) *downloads {
 	dl := &downloads{d: d, folder: folder, file: file, bulkFile: bulkFile, wake: make(chan struct{}, 1), read: make(chan struct{}),
-		failedFile: filepath.Join(filepath.Dir(file), "failed.json"), have: map[string]string{}, ids: map[string]string{}}
+		failedFile: filepath.Join(filepath.Dir(file), "failed.json"), have: map[string]string{}, copies: map[string][]string{}}
 	var kept []*item
 	if b, err := os.ReadFile(file); err == nil {
 		json.Unmarshal(b, &kept)
@@ -220,7 +224,7 @@ func (dl *downloads) rescan() { dl.scan(false) }
 // scan reads the folder, and the folders under it, for the songs downloaded (their ids, a playlist
 // album's by its marker), in one pass; sweep also deletes temp files left behind.
 func (dl *downloads) scan(sweep bool) {
-	have, ids := map[string]string{}, map[string]string{}
+	have, copies := map[string]string{}, map[string][]string{}
 	lists := map[string]string{} // folder: its playlist
 	dl.walk(func(path, name string) {
 		if sweep && leftover.MatchString(name) {
@@ -241,11 +245,11 @@ func (dl *downloads) scan(sweep bool) {
 			have["p"+list+":"+m[1]] = path
 		} else {
 			have[m[1]] = path
+			copies[m[1]] = append(copies[m[1]], path)
 		}
-		ids[m[1]] = path
 	})
 	dl.mu.Lock()
-	dl.have, dl.ids, dl.scanned = have, ids, time.Now()
+	dl.have, dl.copies, dl.scanned = have, copies, time.Now()
 	dl.mu.Unlock()
 }
 
@@ -283,7 +287,30 @@ func (dl *downloads) count() int {
 func (dl *downloads) anyCopy(id string) string {
 	dl.mu.Lock()
 	defer dl.mu.Unlock()
-	return dl.ids[id]
+	if cs := dl.copies[id]; len(cs) > 0 {
+		return cs[0]
+	}
+	for k, p := range dl.have { // only in a playlist's album
+		if strings.HasSuffix(k, ":"+id) {
+			return p
+		}
+	}
+	return ""
+}
+
+// onCard is a song's file on the card, for the list it is in (dl.mu held): a playlist's in its album;
+// one listed in an album, a copy in that album's folder (or in Apple Music/ itself, with Organize
+// Files off), so a compilation's song that is also on its own album is downloaded into both.
+func (dl *downloads) onCard(t apple.Track) (string, bool) {
+	if p, ok := dl.have[key(t)]; ok || t.InAlbum == nil {
+		return p, ok
+	}
+	for _, p := range dl.copies[t.ID] {
+		if dir := filepath.Dir(p); dir == dl.folder || inAlbum(dir, t.InAlbum.Name) || inAlbum(dir, t.Album) {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // state is a song's: "done" (its file), "downloading", "waiting", "failed" (its reason), or "".
@@ -291,7 +318,7 @@ func (dl *downloads) state(t apple.Track) (string, string) {
 	k := key(t)
 	dl.mu.Lock()
 	defer dl.mu.Unlock()
-	if p, ok := dl.have[k]; ok {
+	if p, ok := dl.onCard(t); ok {
 		return "done", p
 	}
 	if dl.cur != nil && key(dl.cur.Track) == k {
@@ -324,7 +351,7 @@ func (dl *downloads) add(ts []apple.Track) int {
 	}
 	for _, t := range ts {
 		k := key(t)
-		if _, on := dl.have[k]; on || queued[k] || t.ID == "" {
+		if _, on := dl.onCard(t); on || queued[k] || t.ID == "" {
 			continue
 		}
 		queued[k] = true
@@ -739,7 +766,7 @@ func (dl *downloads) next(ctx context.Context) bool {
 	}
 	it := dl.waiting[0]
 	dl.waiting = dl.waiting[1:]
-	if p, on := dl.have[key(it.Track)]; on { // queued before the card was read: it is there
+	if p, on := dl.onCard(it.Track); on { // queued before the card was read: it is there
 		it.Path = p
 		dl.mu.Unlock()
 		dl.save()
@@ -798,7 +825,15 @@ func (dl *downloads) next(ctx context.Context) bool {
 		dl.mu.Lock()
 		it.Path = path
 		dl.have[key(it.Track)] = path
-		dl.ids[it.Track.ID] = path
+		if it.Track.List == nil { // the copies left: a stray removed (place) is gone
+			kept := []string{path}
+			for _, p := range dl.copies[it.Track.ID] {
+				if _, err := os.Stat(p); err == nil && p != path {
+					kept = append(kept, p)
+				}
+			}
+			dl.copies[it.Track.ID] = kept
+		}
 		dl.done = append(dl.done, it)
 		if len(dl.done) > 200 {
 			dl.done = dl.done[len(dl.done)-200:]
@@ -843,15 +878,39 @@ func (dl *downloads) reason(err error, am *apple.Client) string {
 
 // place is where a song downloads, as what, with its tags (m the playback service's): a
 // playlist's in the playlist's album; else its album's folder, or Apple Music/ itself with
-// Organize Files off. At 48 kHz or more, the same under 48khz/, always as Artist/Album.
+// Organize Files off. At 48 kHz or more, the same under 48khz/, always as Artist/Album. A song
+// listed in an album that the playback service puts on another (a library compilation's song Apple
+// matched to its own release) is filed and tagged as the album it was listed in: its name, artist,
+// year and cover, its number there; an earlier copy of it alone in its own album's folder, as v1.6
+// and before filed such songs, goes once this one is saved.
 func (dl *downloads) place(t apple.Track, m apple.Meta) spot {
 	tags := tagsOf(t, m)
 	year := m.Year()
 	if year == "" {
 		year = t.Year
 	}
+	sp := spot{tmp: dl.folder, tags: tags}
+	if a := t.InAlbum; a != nil && t.List == nil && !sameAlbum(tags.Album, a.Name) {
+		tags.Album = a.Name
+		if a.Artist != "" {
+			tags.AlbumArtist = a.Artist
+		}
+		tags.Compilation = tags.Compilation || strings.EqualFold(a.Artist, "Various Artists")
+		if t.Number > 0 {
+			tags.Track = t.Number
+		}
+		tags.Tracks, tags.Disc, tags.Discs = max(a.Count, tags.Track), 0, 0
+		if t.Disc > 1 {
+			tags.Disc = t.Disc
+		}
+		if year = a.Year; year != "" {
+			tags.Date = year
+		}
+		sp.cover = a.Cover
+		sp.strays = dl.strays(t)
+	}
 	album := filepath.Join(folderName(tags.AlbumArtist, "Unknown Artist"), albumFolderName(tags.Album, year, "Unknown Album"))
-	sp := spot{tmp: dl.folder, tags: tags, hires: filepath.Join(dl.folder, hiresDir, album)}
+	sp.hires = filepath.Join(dl.folder, hiresDir, album)
 	switch l := t.List; {
 	case l != nil:
 		dir, name := dl.playlistDir(l)
@@ -866,6 +925,28 @@ func (dl *downloads) place(t apple.Track, m apple.Meta) spot {
 		sp.name = songName(t.ID, tags.Title, tags.Track, tags.Tracks, tags.Disc, tags.Discs)
 	}
 	return sp
+}
+
+// strays are copies of a compilation's song filed as their own album's: each alone in its folder,
+// which isn't the compilation's nor a playlist's.
+func (dl *downloads) strays(t apple.Track) []string {
+	dl.mu.Lock()
+	cs := append([]string(nil), dl.copies[t.ID]...)
+	dl.mu.Unlock()
+	var out []string
+	for _, p := range cs {
+		dir := filepath.Dir(p)
+		if dir == dl.folder || inAlbum(dir, t.InAlbum.Name) {
+			continue
+		}
+		if id, _ := readMarker(dir); id != "" {
+			continue
+		}
+		if n, _ := songsIn(dir); n == 1 {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // tagsOf is a song's tags: the playback service's, the list's where it said nothing.

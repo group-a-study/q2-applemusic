@@ -202,6 +202,17 @@ keeps its folder and album; another playlist of the same name gets "<name> (2)".
 card once per album it was downloaded into: the queue knows a playlist's songs by the playlist and
 the song (pp.…:<id>), other songs by the song.
 
+A song listed in an album (album:<id>) carries the album (apple.AlbumRef: a library album's name and
+artist, with its catalogue album's year and cover, include=catalog). When the playback service puts
+the song on another album (sameAlbum: titles compared without case, punctuation, bracketed editions
+or " - EP"/" - Single"), as for a library compilation Apple matched to the songs' own releases, the
+song is filed and tagged as the listed album: its name and artist, year and cover, the library's
+track number of the album's length, a compilation for Various Artists. Such a song counts as on the
+card only in that album's folder (onCard: a copy in a folder named as the album, or in Apple Music/
+itself), so it downloads into the compilation though its own album has it; once saved, a copy of it
+alone in its own album's folder (how v1.6 and before filed it) is deleted, with the folders left
+empty. Every other song is filed by its own tags, as before.
+
 Organize Files on (the default, .applemusic/organize missing or anything but "off"): a song goes
 in Apple Music/<album artist>/<year> - <album>/ as "07 - Title [id].m4a" (the year first, so an
 artist's albums sort oldest first wherever they are listed by name; an album without a year, its
