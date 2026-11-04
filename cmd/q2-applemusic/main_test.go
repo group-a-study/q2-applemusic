@@ -35,6 +35,8 @@ type fakeApple struct {
 	token  string         // the media-user-token it takes
 	fail   map[string]int // songs the playback service refuses, how many more times
 	plays  map[string]int // the playback service's answers, by song
+	albums []any          // the library's albums as their listing gives them; nil: Tender Buttons and Berberian Sound Studio
+	roadAt string         // Road Trip's last change in the playlists' listing; "" says none
 }
 
 const devToken = "eyJhbGciOiJFUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln"
@@ -146,6 +148,13 @@ func newFakeApple(t *testing.T) *fakeApple {
 		json.NewEncoder(w).Encode(map[string]any{"meta": map[string]any{"subscription": map[string]any{"active": active, "storefront": "au"}}})
 	}))
 	mux.HandleFunc("/v1/me/library/albums", signed(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		albums := f.albums
+		f.mu.Unlock()
+		if albums != nil {
+			json.NewEncoder(w).Encode(map[string]any{"data": albums})
+			return
+		}
 		data(w, res("library-albums", "l.a1", map[string]any{"name": "Tender Buttons", "artistName": "Broadcast"}),
 			res("library-albums", "l.a2", map[string]any{"name": "Berberian Sound Studio", "artistName": "Broadcast"}))
 	}))
@@ -175,7 +184,13 @@ func newFakeApple(t *testing.T) *fakeApple {
 		data(w, songRes(songs["103"], true))
 	}))
 	mux.HandleFunc("/v1/me/library/playlists", signed(func(w http.ResponseWriter, r *http.Request) {
-		data(w, res("library-playlists", "p.road", map[string]any{"name": "Road Trip"}))
+		attrs := map[string]any{"name": "Road Trip"}
+		f.mu.Lock()
+		if f.roadAt != "" {
+			attrs["lastModifiedDate"] = f.roadAt
+		}
+		f.mu.Unlock()
+		data(w, res("library-playlists", "p.road", attrs))
 	}))
 	mux.HandleFunc("/v1/me/library/playlists/p.road", signed(func(w http.ResponseWriter, r *http.Request) {
 		data(w, res("library-playlists", "p.road", map[string]any{"name": "Road Trip",

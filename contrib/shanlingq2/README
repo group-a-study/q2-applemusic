@@ -70,11 +70,14 @@ it leaves.
       POST /api/login takes the PIN, POST /api/token checks and saves a media-user-token (the value,
       a Cookie header or a cookies.txt), POST /api/signout removes it; posts need the header X-Q2: 1
   .applemusic/media-user-token, .applemusic/organize, .applemusic/mode, .applemusic/queue.json,
-  .applemusic/bulk.json, .applemusic/failed.json
+  .applemusic/bulk.json, .applemusic/lists.json, .applemusic/failed.json
       the sign-in, Organize Files (on, off), Mode (download, stream), the songs waiting, Download
-      All's lists to go and the songs that failed; updates keep them
+      All's lists to go and those it waits on the songs of, and the songs that failed; updates keep
+      them
   Apple Music/Not Downloaded.txt
       the songs that failed, for a computer (Downloads, below)
+  Apple Music/Downloaded Albums and Playlists.txt
+      the lists Download All has finished (Downloads, below), which it reads back
   .applemusic/devtoken
       the web player's developer token, read from music.apple.com's script and kept until it
       expires or Apple refuses it
@@ -190,7 +193,18 @@ Download All (bulk albums|playlists): the library's albums or playlists, as the 
 go in .applemusic/bulk.json. Once no song waits, the next list's songs are fetched and queued (a
 list gone from the library is skipped), so Apple is asked for one list at a time and the queue
 stays one album long. Downloads says how many lists are left; Stop Download All drops them, the
-songs queued still downloading.
+songs queued still downloading. A list is finished once each of its songs is on the card or failed
+(a failed one isn't queued again: Try the Failed Again does that); those it still waits on are in
+.applemusic/lists.json with its songs to come. A finished list is written to Apple Music/Downloaded
+Albums and Playlists.txt: three lines of explanation, a header, then a tab-separated line each with
+its kind, name, artist, songs, last change, how many failed, its music.apple.com/library/albums/<id>
+or /library/playlist/<id> link, and when. Download All leaves out a list whose line has the song count
+(an album) or last change (a playlist) the library's listing gives now, without asking Apple for its
+songs, and waits for a listing fetched now rather than one kept from before (albums added on a
+phone since the page opened). A line deleted by hand has its list looked at again. With no line of a
+kind, that kind's lists already on the card are written as finished: an album whose <artist>/<album>
+folder (in Apple Music/ or 48khz/, matched loosely) holds its song count, failed songs counted; a
+playlist whose folders' .q2-playlist markers were written after its last change.
 
 A playlist's songs (playlist:<id>, however downloaded) are kept as an album of their own, in
 Apple Music/Playlists/<playlist>/, "07 - Title [id].m4a" by the song's place in the playlist:

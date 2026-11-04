@@ -86,10 +86,15 @@ func key(t apple.Track) string {
 	return t.ID
 }
 
-// bulkList is a list Download All will queue: its context (album:<id>, playlist:<id>) and name.
+// bulkList is a list Download All will queue: its context (album:<id>, playlist:<id>) and name, and
+// what the library's listing says of it (record.go): an album's artist and song count, a playlist's
+// last change.
 type bulkList struct {
-	Ctx  string `json:"ctx"`
-	Name string `json:"name"`
+	Ctx     string `json:"ctx"`
+	Name    string `json:"name"`
+	Artist  string `json:"artist,omitempty"`
+	Songs   int    `json:"songs,omitempty"`
+	Changed string `json:"changed,omitempty"`
 }
 
 type bulkJob struct {
@@ -103,9 +108,11 @@ type downloads struct {
 	file       string // .applemusic/queue.json
 	bulkFile   string // .applemusic/bulk.json
 	failedFile string // .applemusic/failed.json: the failed songs, kept across restarts
+	openFile   string // .applemusic/lists.json: the lists Download All waits on (record.go)
 
 	mu        sync.Mutex
 	wmu       sync.Mutex // one queue.json write at a time: they share its .tmp
+	rmu       sync.Mutex // one read or write of Download All's record at a time
 	waiting   []*item
 	cur       *item
 	cancel    context.CancelFunc // the current download's
@@ -122,12 +129,14 @@ type downloads struct {
 	wake      chan struct{}
 	saveTimer *time.Timer
 	bulk      bulkJob
-	expanding string // the list Download All is fetching now
+	expanding string               // the list Download All is fetching now
+	open      map[string]*openList // by context: Download All's lists with songs to come
 }
 
 func newDownloads(d *daemon, folder, file, bulkFile string) *downloads {
 	dl := &downloads{d: d, folder: folder, file: file, bulkFile: bulkFile, wake: make(chan struct{}, 1), read: make(chan struct{}),
-		failedFile: filepath.Join(filepath.Dir(file), "failed.json"), have: map[string]string{}, copies: map[string][]string{}}
+		failedFile: filepath.Join(filepath.Dir(file), "failed.json"), openFile: filepath.Join(filepath.Dir(file), "lists.json"),
+		have: map[string]string{}, copies: map[string][]string{}, open: map[string]*openList{}}
 	var kept []*item
 	if b, err := os.ReadFile(file); err == nil {
 		json.Unmarshal(b, &kept)
@@ -139,6 +148,14 @@ func newDownloads(d *daemon, folder, file, bulkFile string) *downloads {
 	}
 	if b, err := os.ReadFile(bulkFile); err == nil {
 		json.Unmarshal(b, &dl.bulk)
+	}
+	if b, err := os.ReadFile(dl.openFile); err == nil {
+		json.Unmarshal(b, &dl.open)
+		for ctx, o := range dl.open {
+			if o == nil {
+				delete(dl.open, ctx)
+			}
+		}
 	}
 	var failed []*item
 	if b, err := os.ReadFile(dl.failedFile); err == nil {
@@ -342,18 +359,34 @@ func (dl *downloads) state(t apple.Track) (string, string) {
 // add queues the songs not on the card or queued already (a failed one is tried again); it
 // returns how many it queued.
 func (dl *downloads) add(ts []apple.Track) int {
+	n, _, _ := dl.queue(ts, true)
+	return n
+}
+
+// queue queues the songs not on the card or queued already, and the failed ones if again; how many
+// it queued, the songs still to come (queued now or before), and how many failed and stay so.
+func (dl *downloads) queue(ts []apple.Track, again bool) (int, []string, int) {
 	dl.mu.Lock()
-	n, had := 0, len(dl.failed)
-	queued := map[string]bool{}
-	if dl.cur != nil {
-		queued[key(dl.cur.Track)] = true
+	n, failed, had := 0, 0, len(dl.failed)
+	queued := dl.queuedKeys()
+	gave := map[string]bool{}
+	for _, it := range dl.failed {
+		gave[key(it.Track)] = true
 	}
-	for _, it := range dl.waiting {
-		queued[key(it.Track)] = true
-	}
+	var open []string
 	for _, t := range ts {
 		k := key(t)
-		if _, on := dl.onCard(t); on || queued[k] || t.ID == "" {
+		if _, on := dl.onCard(t); on || t.ID == "" {
+			continue
+		}
+		if gave[k] && !again {
+			failed++
+			continue
+		}
+		if index(open, k) < 0 {
+			open = append(open, k)
+		}
+		if queued[k] {
 			continue
 		}
 		queued[k] = true
@@ -370,7 +403,7 @@ func (dl *downloads) add(ts []apple.Track) int {
 		dl.save()
 		dl.poke()
 	}
-	return n
+	return n, open, failed
 }
 
 func drop(l []*item, k string) []*item {
@@ -407,9 +440,11 @@ func (dl *downloads) clear() int {
 	n := len(dl.waiting)
 	dl.waiting = nil
 	dl.bulk = bulkJob{}
+	dl.open = map[string]*openList{}
 	dl.mu.Unlock()
 	dl.save()
 	dl.saveBulk()
+	dl.saveOpen()
 	return n
 }
 
@@ -452,6 +487,7 @@ func (dl *downloads) fail(it *item, why string, am *apple.Client) {
 	dl.failed = append(drop(dl.failed, key(it.Track)), it)
 	dl.mu.Unlock()
 	dl.saveFailed() // noted before the queue moves on
+	dl.settle(key(it.Track), true)
 	dl.mu.Lock()
 	dl.cur, dl.cancel = nil, nil
 	dl.mu.Unlock()
@@ -575,16 +611,41 @@ func (dl *downloads) saveBulk() {
 	}
 }
 
-// bulkAdd adds lists to Download All (those it doesn't have); how many it added.
-func (dl *downloads) bulkAdd(lists []bulkList) int {
+// bulkAdd adds lists to Download All: those it doesn't have, isn't downloading the songs of, and the
+// record (record.go) doesn't have as finished since the listing last changed them. How many it
+// added, and how many were finished before (the record's, or found on the card now).
+func (dl *downloads) bulkAdd(lists []bulkList) (int, int) {
+	sigs, kinds := dl.finishedSigs()
+	select { // the lists already on the card are found in its read
+	case <-dl.read:
+	case <-time.After(5 * time.Second):
+		kinds = map[string]bool{"album": true, "playlist": true}
+	}
 	dl.mu.Lock()
 	have := map[string]bool{}
 	for _, l := range dl.bulk.Lists {
 		have[l.Ctx] = true
 	}
-	n := 0
+	queued := dl.queuedKeys()
+	var rest []bulkList
+	before := 0
 	for _, l := range lists {
-		if !have[l.Ctx] {
+		switch sig := l.sig(); {
+		case sig != "" && sigs[l.Ctx] == sig:
+			before++
+		case have[l.Ctx] || dl.underWay(l, queued):
+		default:
+			rest = append(rest, l)
+		}
+	}
+	found := dl.onCardLists(rest, kinds, queued)
+	gone := map[string]bool{}
+	for _, f := range found {
+		gone[f.List.Ctx] = true
+	}
+	n := 0
+	for _, l := range rest {
+		if !gone[l.Ctx] {
 			have[l.Ctx] = true
 			dl.bulk.Lists = append(dl.bulk.Lists, l)
 			n++
@@ -595,11 +656,12 @@ func (dl *downloads) bulkAdd(lists []bulkList) int {
 	}
 	dl.bulk.Total += n
 	dl.mu.Unlock()
+	dl.finish(found...)
 	if n > 0 {
 		dl.saveBulk()
 		dl.poke()
 	}
-	return n
+	return n, before + len(found)
 }
 
 // bulkStop ends Download All: the songs already queued still download.
@@ -722,6 +784,15 @@ func (dl *downloads) expand(ctx context.Context) bool {
 		dl.expanding = ""
 		dl.mu.Unlock()
 	}()
+	if sigs, _ := dl.finishedSigs(); l.sig() != "" && sigs[l.Ctx] == l.sig() { // finished since it was added
+		dl.mu.Lock()
+		if len(dl.bulk.Lists) > 0 && dl.bulk.Lists[0] == l {
+			dl.bulk.Lists = dl.bulk.Lists[1:]
+		}
+		dl.mu.Unlock()
+		dl.saveBulk()
+		return true
+	}
 	am, why := dl.ready()
 	if am == nil {
 		dl.stall(nil, why)
@@ -749,7 +820,22 @@ func (dl *downloads) expand(ctx context.Context) bool {
 	}
 	dl.mu.Unlock()
 	dl.saveBulk()
-	n := dl.add(ts)
+	n, open, failed := dl.queue(ts, false) // a song that failed before is left for Try the Failed Again
+	if err == nil {                        // listed: finished once its songs are on the card or failed
+		if strings.HasPrefix(l.Ctx, "playlist:") {
+			l.Songs = len(ts)
+		}
+		dl.mu.Lock()
+		delete(dl.open, l.Ctx)
+		if len(open) > 0 {
+			dl.open[l.Ctx] = &openList{List: l, Keys: open, Failed: failed}
+		}
+		dl.mu.Unlock()
+		if len(open) == 0 {
+			dl.finish(finished{List: l, Failed: failed})
+		}
+		dl.saveOpen()
+	}
 	dl.mu.Lock()
 	left := len(dl.bulk.Lists)
 	dl.mu.Unlock()
@@ -779,6 +865,7 @@ func (dl *downloads) next(ctx context.Context) bool {
 		it.Path = p
 		dl.mu.Unlock()
 		dl.save()
+		dl.settle(key(it.Track), false)
 		return true
 	}
 	dl.cur, dl.dropped = it, false
@@ -831,6 +918,7 @@ func (dl *downloads) next(ctx context.Context) bool {
 	dl.mu.Unlock()
 	switch {
 	case err == nil:
+		dl.settle(key(it.Track), false) // its list noted before the queue moves on
 		dl.mu.Lock()
 		it.Path = path
 		dl.have[key(it.Track)] = path

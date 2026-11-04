@@ -49,6 +49,7 @@ type ListRef struct {
 type Album struct {
 	ID, Name, Artist, Year, Artwork string
 	Library                         bool // a library album (l.…), whose tracks are the library's
+	Songs                           int  // a library album's songs in the library, as its listing counts them
 }
 
 type Artist struct {
@@ -59,6 +60,7 @@ type Artist struct {
 type Playlist struct {
 	ID, Name, Curator, Artwork string
 	Library                    bool
+	Changed                    string // a library playlist's last change, as its listing dates it
 }
 
 // SearchResults are a term's songs, albums, artists and playlists.
@@ -81,6 +83,8 @@ type resource struct {
 		TrackNumber int    `json:"trackNumber"`
 		DiscNumber  int    `json:"discNumber"`
 		ReleaseDate string `json:"releaseDate"`
+		TrackCount  int    `json:"trackCount"`       // a library album's
+		Modified    string `json:"lastModifiedDate"` // a library playlist's
 		Artwork     *struct {
 			URL string `json:"url"`
 		} `json:"artwork"`
@@ -162,12 +166,12 @@ func tracks(rs []resource) []Track {
 
 func (r resource) album() Album {
 	return Album{ID: r.ID, Name: r.Attributes.Name, Artist: r.Attributes.ArtistName, Year: year(r.Attributes.ReleaseDate),
-		Artwork: r.artwork(), Library: strings.HasPrefix(r.Type, "library-")}
+		Artwork: r.artwork(), Library: strings.HasPrefix(r.Type, "library-"), Songs: r.Attributes.TrackCount}
 }
 
 func (r resource) playlist() Playlist {
 	return Playlist{ID: r.ID, Name: r.Attributes.Name, Curator: r.Attributes.CuratorName, Artwork: r.artwork(),
-		Library: strings.HasPrefix(r.Type, "library-")}
+		Library: strings.HasPrefix(r.Type, "library-"), Changed: r.Attributes.Modified}
 }
 
 // maxItems caps a list fetched whole (an account's library songs, a playlist).

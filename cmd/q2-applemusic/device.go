@@ -75,6 +75,17 @@ func (c *cache) clear() {
 // get is key's listing: a kept one younger than keepFor; else fetch's, waited for at most answerIn
 // (errLoading after, the fetch carrying on); else, while fetch runs again, the one kept.
 func (c *cache) get(key string, fetch func() (listing, error)) (listing, error) {
+	return c.getting(key, fetch, false)
+}
+
+// fresh is get, but an old kept listing waits for fetch as a first one does (Download All takes
+// the library as it is now: albums added on a phone since the page was opened included). A fetch
+// that fails leaves the kept one.
+func (c *cache) fresh(key string, fetch func() (listing, error)) (listing, error) {
+	return c.getting(key, fetch, true)
+}
+
+func (c *cache) getting(key string, fetch func() (listing, error), fresh bool) (listing, error) {
 	c.mu.Lock()
 	e := c.m[key]
 	if e == nil {
@@ -103,7 +114,7 @@ func (c *cache) get(key string, fetch func() (listing, error)) (listing, error) 
 	}
 	busy, kept, l := e.busy, !e.at.IsZero(), e.l
 	c.mu.Unlock()
-	if kept {
+	if kept && !fresh {
 		return l, nil
 	}
 	select {
@@ -687,7 +698,7 @@ func (d *daemon) playlistsListing(ctx context.Context, am *apple.Client) (listin
 	ps, err := am.LibraryPlaylists(ctx)
 	l := listing{rows: []q2spot.Row{open("chart", "Top Charts", "Apple Music's most played")}}
 	for _, p := range ps {
-		l.lists = append(l.lists, bulkList{Ctx: "playlist:" + p.ID, Name: p.Name})
+		l.lists = append(l.lists, bulkList{Ctx: "playlist:" + p.ID, Name: p.Name, Changed: p.Changed})
 	}
 	if len(ps) > 0 {
 		l.rows = append(l.rows, q2spot.Row{Kind: "action", URI: "bulk", Context: "playlists",
@@ -704,7 +715,7 @@ func (d *daemon) albumsListing(ctx context.Context, am *apple.Client) (listing, 
 	as, err := am.LibraryAlbums(ctx)
 	var l listing
 	for _, a := range as {
-		l.lists = append(l.lists, bulkList{Ctx: "album:" + a.ID, Name: a.Name})
+		l.lists = append(l.lists, bulkList{Ctx: "album:" + a.ID, Name: a.Name, Artist: a.Artist, Songs: a.Songs})
 	}
 	if len(as) > 0 {
 		l.rows = append(l.rows, q2spot.Row{Kind: "action", URI: "bulk", Context: "albums",
@@ -719,7 +730,8 @@ func (d *daemon) albumsListing(ctx context.Context, am *apple.Client) (listing, 
 }
 
 // bulk is Download All for the library's albums or playlists: each queued in turn (downloads.go
-// expand), the next once the last one's songs are on the card.
+// expand), the next once the last one's songs are on the card; those finished before, and not
+// changed since, left out (record.go).
 func (d *daemon) bulk(am *apple.Client, kind string) q2spot.Reply {
 	if !subscribed(am) {
 		return q2spot.Fail(q2spot.Premium, "Downloads need an Apple Music subscription")
@@ -732,7 +744,7 @@ func (d *daemon) bulk(am *apple.Client, kind string) q2spot.Reply {
 	default:
 		return q2spot.Fail(q2spot.Bad, "Bad request")
 	}
-	l, err := d.cache.get(kind, func() (listing, error) {
+	l, err := d.cache.fresh(kind, func() (listing, error) {
 		ctx, cancel := fetchCtx()
 		defer cancel()
 		return fetch(ctx, am)
@@ -746,14 +758,25 @@ func (d *daemon) bulk(am *apple.Client, kind string) q2spot.Reply {
 	if len(l.lists) == 0 {
 		return q2spot.Reply{Message: "Nothing to download"}
 	}
-	n := d.dl.bulkAdd(l.lists)
-	if n == 0 {
+	one := strings.TrimSuffix(kind, "s")
+	n, before := d.dl.bulkAdd(l.lists)
+	switch {
+	case n == 0 && before == 1 && len(l.lists) == 1:
+		return q2spot.Reply{Message: "Nothing new: the " + one + " was downloaded before"}
+	case n == 0 && before == len(l.lists):
+		return q2spot.Reply{Message: "Nothing new: all " + plural(before, one) + " were downloaded before"}
+	case n == 0:
 		return q2spot.Reply{Message: "Already downloading them all"}
+	case before > 0:
+		were := " were"
+		if before == 1 {
+			were = " was"
+		}
+		return q2spot.Reply{Message: "Downloading " + plural(n, one) + "; " + itoa(before) + were + " downloaded before"}
+	case n == 1:
+		return q2spot.Reply{Message: "Downloading 1 " + one}
 	}
-	if n == 1 {
-		return q2spot.Reply{Message: "Downloading 1 " + strings.TrimSuffix(kind, "s")}
-	}
-	return q2spot.Reply{Message: "Downloading all " + plural(n, strings.TrimSuffix(kind, "s"))}
+	return q2spot.Reply{Message: "Downloading all " + plural(n, one)}
 }
 
 // allOnCard is a list's first row when all its songs (rows, local each) are on the card: their
