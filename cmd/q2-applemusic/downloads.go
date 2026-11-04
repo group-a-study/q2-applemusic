@@ -115,6 +115,7 @@ type downloads struct {
 	have      map[string]string   // key: its file
 	copies    map[string][]string // song id: its files but in playlists' albums
 	scanned   time.Time
+	fetched   bool          // a song downloaded since Deezer's duplicates were last looked for
 	read      chan struct{} // closed once the card was first read (firstScan)
 	scanning  atomic.Bool   // a read of the card under way
 	stalled   string        // why the queue doesn't move now; "" when it does
@@ -205,6 +206,7 @@ func (dl *downloads) firstScan() {
 	dl.mu.Unlock()
 	logf("card read: %d songs in %d ms", n, time.Since(t).Milliseconds())
 	dl.scanning.Store(false)
+	dl.d.lookForDuplicates() // under way before the card counts as read
 	close(dl.read)
 }
 
@@ -646,6 +648,13 @@ func (dl *downloads) run(ctx context.Context) {
 		if !stalled {
 			for dl.next(ctx) || dl.expand(ctx) {
 			}
+			dl.mu.Lock()
+			fetched := dl.fetched
+			dl.fetched = false
+			dl.mu.Unlock()
+			if fetched { // the queue done for now: Deezer's albums Apple Music/ has now
+				dl.d.lookForDuplicates()
+			}
 		}
 		wait := time.NewTimer(retryIn)
 		select {
@@ -825,6 +834,7 @@ func (dl *downloads) next(ctx context.Context) bool {
 		dl.mu.Lock()
 		it.Path = path
 		dl.have[key(it.Track)] = path
+		dl.fetched = true
 		if it.Track.List == nil { // the copies left: a stray removed (place) is gone
 			kept := []string{path}
 			for _, p := range dl.copies[it.Track.ID] {

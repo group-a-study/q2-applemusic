@@ -237,6 +237,19 @@ counted: one counted three times goes to the failed songs ("it stopped Apple Mus
 instead of first again after every restart. The temp files an interrupted download left are swept
 when q2-applemusic starts.
 
+Deezer's duplicates (dedupe.go)
+-------------------------------
+
+After the start's read of the card, and each time the queue empties having downloaded something,
+Deezer/<artist>/<album>/ (q2-deezer's organized folders) is compared with Apple Music/<artist>/<album>/
+and 48khz/<artist>/<album>/ (Playlists/ aside): an album is its artist folder's name (letters and
+digits, lower case) and its title (albumKey: the year before or after, bracketed editions and
+" - EP" or " - Single" left out, letters and digits only; equal, not one within the other), and its
+songs are counted. A Deezer album Apple Music has at least as many songs of gets a .nomedia whose
+text is ourMark; one of ours whose album no longer matches loses it; any other .nomedia is left.
+Q2 Pod's library scan skips a folder holding .nomedia (its ringnav_scan_dir). Downloaded Songs says
+how many are kept out.
+
 Stream mode
 -----------
 

@@ -814,6 +814,10 @@ func (d *daemon) cardArtists(base, cursor string) q2spot.Reply {
 		}
 		rows = append(rows, q2spot.Row{Kind: "list", URI: "cardalbums", Context: filepath.Join(base, a), Title: a, Subtitle: what})
 	}
+	if n := d.deduped.Load(); n > 0 && base == "" {
+		rows = append(rows, info(plural(int(n), "Deezer album")+" kept out of the library",
+			"Apple Music/ has them: run Library → Update Local Music"))
+	}
 	if hires {
 		_, as := songsIn(filepath.Join(root, hiresDir))
 		rows = append(rows, q2spot.Row{Kind: "list", URI: "cardartists", Context: hiresDir, Title: "48 kHz and Higher",

@@ -32,7 +32,7 @@ import (
 	"github.com/group-a-study/q2-applemusic/internal/widevine"
 )
 
-const version = "q2-v1.7"
+const version = "q2-v1.8"
 
 // transport carries every request to Apple: TLS checked against the add-on's own roots, as the
 // firmware has none. Tests answer for Apple instead.
@@ -78,6 +78,8 @@ type daemon struct {
 	cookies    map[string]cookieSeen // cookies files looked at (cookies.go)
 	cookieNote string                // why the last one didn't sign in
 	importing  atomic.Bool           // a look for cookies files under way
+	deduping   atomic.Bool           // a look for Deezer duplicates under way (dedupe.go)
+	deduped    atomic.Int64          // Deezer albums kept out of the library, as last counted
 }
 
 // signinPort is where the sign-in page listens (the next free one if taken).

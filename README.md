@@ -46,6 +46,10 @@ A song downloaded from a playlist (pressed in it, its **Download All**, or **Dow
 
 Each song is tagged with the playlist's name as its album, `Playlists` as its album artist (so **Library → Artists** lists one *Playlists* artist holding them all), and its place in the playlist as its track number. Each song keeps its own cover, so Now Playing shows the song's; the playlist's cover is saved beside them as `cover.jpg`, which Q2 Pod shows for the album in Coverflow and Albums (group-a-study's Q2 Pod test builds from 4 November 2026 on; others show the first song's cover there). A song on a playlist and on an album you downloaded is on the card twice, once in each. A hidden `.q2-playlist` file names the playlist, so a renamed playlist keeps its folder.
 
+## Albums in Deezer/ too
+
+An album you have from both [q2-deezer](https://github.com/group-a-study/q2-deezer) (FLAC, in `Deezer/`) and Apple Music (AAC) is in the library once, as Apple Music's: Apple Music writes a `.nomedia` file into Deezer's copy of the album, and Q2 Pod's **Update Local Music** leaves out any folder holding one (group-a-study's Q2 Pod test builds from test-1.5.3-dev70 on). An album only Deezer has (say, one Apple Music doesn't sell in your country) stays in the library. Albums are matched by their artist folder and title, compared loosely (case, punctuation, the year, editions in brackets and " - EP" aside), and only where Apple Music's copy has at least as many songs, so no song leaves the library. Nothing is moved or deleted, and Deezer still sees its songs. **Downloaded Songs** says how many Deezer albums are kept out; run **Library → Update Local Music** after downloads for the library to follow. If Apple Music's copy goes, its `.nomedia` goes too; a `.nomedia` you put somewhere yourself (any folder, to keep it out of the library) is never touched.
+
 ## Stream or download
 
 **Mode: Download** (the default): a press downloads the song to `Apple Music/`, as above.

@@ -277,7 +277,13 @@ func rigWith(t *testing.T, f *fakeApple, before func(card string)) *daemon {
 		filepath.Join(tmp, "browse.sock"), filepath.Join(tmp, "ctl.sock"))
 	done := make(chan struct{})
 	go func() { d.run(); close(done) }()
-	t.Cleanup(func() { d.shutdown(); <-done })
+	t.Cleanup(func() {
+		d.shutdown()
+		<-done
+		for d.deduping.Load() { // its look for Deezer duplicates, which reads cardReady, done too
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
 	until(t, "the sign-in", func() bool { return d.authState() == authOK })
 	return d
 }
@@ -437,6 +443,7 @@ func TestBulkStop(t *testing.T) {
 	f := newFakeApple(t)
 	d := rig(t, f)
 	ask(d, "albums")
+	until(t, "the start's look at the card", func() bool { return d.dl.scannedYet() && !d.deduping.Load() })
 	cardReady = func() bool { return false } // the card away: Download All waits, its lists kept
 	ask(d, "bulk", "albums")
 	until(t, "the queue to wait", func() bool { _, _, _, _, why := d.dl.snapshot(); return why == "The card is away" })
@@ -762,5 +769,60 @@ func TestCompilation(t *testing.T) {
 	}
 	if r := ask(d, "tracks", "album:l.a1"); r.Rows[0].Title != "All on the card" || r.Rows[0].URI != tb+"/" {
 		t.Errorf("Tender Buttons page after %+v", r.Rows[0])
+	}
+}
+
+// TestDedupe: Deezer's copy of an album Apple Music/ has whole is kept out of the library (.nomedia);
+// one only Deezer has, or that Apple Music/ has fewer songs of, stays; a mark the app wrote that no
+// longer holds goes, and one put there by hand is left.
+func TestDedupe(t *testing.T) {
+	f := newFakeApple(t)
+	var dz string
+	d := rigWith(t, f, func(card string) {
+		dz = filepath.Join(card, "Deezer", "Broadcast")
+		album := func(name string, songs int, mark string) {
+			os.MkdirAll(filepath.Join(dz, name), 0o755)
+			for i := 1; i <= songs; i++ {
+				os.WriteFile(filepath.Join(dz, name, fmt.Sprintf("%02d - Song [%d].flac", i, 900+i)), []byte("flac"), 0o644)
+			}
+			if mark != "" {
+				os.WriteFile(filepath.Join(dz, name, nomedia), []byte(mark), 0o644)
+			}
+		}
+		album("2005 - Tender Buttons", 2, "")
+		album("2009 - Ha Ha Sound", 1, "")
+		album("2012 - Berberian Sound Studio", 3, "")
+		album("Old Album (2001)", 1, ourMark)
+		album("Kept By Hand", 1, "mine")
+	})
+	ask(d, "albums")
+	ask(d, "bulk", "albums")
+	until(t, "the downloads and the look for duplicates", func() bool {
+		_, err := os.Stat(filepath.Join(dz, "2005 - Tender Buttons", nomedia))
+		return !d.dl.pending() && err == nil && !d.deduping.Load()
+	})
+	mark := func(album string) string {
+		b, err := os.ReadFile(filepath.Join(dz, album, nomedia))
+		if err != nil {
+			return "none"
+		}
+		return string(b)
+	}
+	for album, want := range map[string]string{"2005 - Tender Buttons": ourMark, "2009 - Ha Ha Sound": "none",
+		"2012 - Berberian Sound Studio": "none", "Old Album (2001)": "none", "Kept By Hand": "mine"} {
+		if got := mark(album); got != want {
+			t.Errorf("%s: .nomedia %q, want %q", album, got, want)
+		}
+	}
+	if d.deduped.Load() != 1 || !strings.Contains(strings.Join(titles(ask(d, "cardartists")), "|"), "1 Deezer album kept out of the library") {
+		t.Errorf("deduped %d, Downloaded Songs %q", d.deduped.Load(), titles(ask(d, "cardartists")))
+	}
+	// Apple Music's copy gone: Deezer's is in the library again.
+	os.RemoveAll(filepath.Join(d.dl.folder, "Broadcast", "2005 - Tender Buttons"))
+	if n := d.dedupe(); n != 0 || mark("2005 - Tender Buttons") != "none" {
+		t.Errorf("after Apple Music's copy went: %d kept out, mark %q", n, mark("2005 - Tender Buttons"))
+	}
+	if albumKey(albumTitle("2005 - Greatest Hits Vol. 2")) == albumKey(albumTitle("Greatest Hits (2001)")) {
+		t.Error("two albums taken for one")
 	}
 }
