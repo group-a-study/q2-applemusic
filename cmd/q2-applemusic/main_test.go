@@ -37,6 +37,7 @@ type fakeApple struct {
 	plays  map[string]int // the playback service's answers, by song
 	albums []any          // the library's albums as their listing gives them; nil: Tender Buttons and Berberian Sound Studio
 	roadAt string         // Road Trip's last change in the playlists' listing; "" says none
+	lists  []any          // the library's playlists as their listing gives them; nil: Road Trip
 }
 
 const devToken = "eyJhbGciOiJFUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln"
@@ -189,7 +190,12 @@ func newFakeApple(t *testing.T) *fakeApple {
 		if f.roadAt != "" {
 			attrs["lastModifiedDate"] = f.roadAt
 		}
+		lists := f.lists
 		f.mu.Unlock()
+		if lists != nil {
+			json.NewEncoder(w).Encode(map[string]any{"data": lists})
+			return
+		}
 		data(w, res("library-playlists", "p.road", attrs))
 	}))
 	mux.HandleFunc("/v1/me/library/playlists/p.road", signed(func(w http.ResponseWriter, r *http.Request) {
@@ -842,28 +848,72 @@ func TestDedupe(t *testing.T) {
 	}
 }
 
-// TestNewestFirst: Albums and Playlists list the library's last added first, undated ones last
-// in Apple's order (by name), and Download All goes in that order.
-func TestNewestFirst(t *testing.T) {
+// TestSort: Albums and Playlists list the library's last added first by default (undated ones
+// last, in Apple's order), and Sort steps through name, artist and release date, saved, the pages
+// fetched again in the new order; Download All goes in the pages' order.
+func TestSort(t *testing.T) {
 	f := newFakeApple(t)
-	album := func(id, name, added string) map[string]any {
-		attrs := map[string]any{"name": name, "artistName": "Broadcast"}
+	album := func(id, name, artist, released, added string) map[string]any {
+		attrs := map[string]any{"name": name, "artistName": artist}
+		if released != "" {
+			attrs["releaseDate"] = released
+		}
 		if added != "" {
 			attrs["dateAdded"] = added
 		}
 		return res("library-albums", id, attrs)
 	}
-	f.albums = []any{album("l.a3", "Ha Ha Sound", ""), album("l.a2", "Berberian Sound Studio", "2025-02-09T05:15:17Z"),
-		album("l.a4", "The Noise Made by People", ""), album("l.a1", "Tender Buttons", "2026-11-04T09:00:00Z")}
+	playlist := func(id, name, added string) map[string]any {
+		return res("library-playlists", id, map[string]any{"name": name, "dateAdded": added})
+	}
+	f.albums = []any{album("l.a3", "Ha Ha Sound", "Broadcast", "2003-07-07", ""),
+		album("l.a2", "Berberian Sound Studio", "Broadcast", "2013-01-07", "2025-02-09T05:15:17Z"),
+		album("l.a4", "The Noise Made by People", "Broadcast", "", ""),
+		album("l.a1", "Tender Buttons", "Broadcast", "2005-09-19", "2026-11-04T09:00:00Z"),
+		album("l.a5", "Antics", "Interpol", "2004-09-27", "2025-06-01T00:00:00Z")}
+	f.lists = []any{playlist("p.b", "Bedtime", "2024-01-01T00:00:00Z"), playlist("p.r", "Road Trip", "2026-01-01T00:00:00Z"),
+		playlist("p.a", "Autumn", "2025-01-01T00:00:00Z")}
 	d := rig(t, f)
-	if got := strings.Join(titles(ask(d, "albums")), "|"); got != "Download All Albums|Tender Buttons|Berberian Sound Studio|Ha Ha Sound|The Noise Made by People" {
-		t.Errorf("albums %q", got)
+	pages := func() (string, string) {
+		return strings.Join(titles(ask(d, "albums"))[1:], "|"), strings.Join(titles(ask(d, "playlists"))[2:], "|")
+	}
+	for i, want := range []struct{ row, reply, albums, playlists string }{
+		{"Sort: Recently Added", "", "Tender Buttons|Antics|Berberian Sound Studio|Ha Ha Sound|The Noise Made by People", "Road Trip|Autumn|Bedtime"},
+		{"Sort: Name", "Albums and Playlists: A to Z", "Antics|Berberian Sound Studio|Ha Ha Sound|The Noise Made by People|Tender Buttons", "Autumn|Bedtime|Road Trip"},
+		{"Sort: Artist", "Albums and Playlists: albums by artist", "Ha Ha Sound|Tender Buttons|Berberian Sound Studio|The Noise Made by People|Antics", "Autumn|Bedtime|Road Trip"},
+		{"Sort: Release Date", "Albums and Playlists: albums by release date", "Berberian Sound Studio|Tender Buttons|Antics|Ha Ha Sound|The Noise Made by People", "Autumn|Bedtime|Road Trip"},
+		{"Sort: Recently Added", "Albums and Playlists: the last added first", "Tender Buttons|Antics|Berberian Sound Studio|Ha Ha Sound|The Noise Made by People", "Road Trip|Autumn|Bedtime"},
+	} {
+		if i > 0 {
+			if r := ask(d, "sort"); r.Message != want.reply {
+				t.Fatalf("sort %d: %+v", i, r)
+			}
+		}
+		if got := titles(ask(d, "menu")); !strings.Contains(strings.Join(got, "|"), want.row) {
+			t.Errorf("menu %q, want %q", got, want.row)
+		}
+		if albums, playlists := pages(); albums != want.albums || playlists != want.playlists {
+			t.Errorf("%s: albums %q, playlists %q", want.row, albums, playlists)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(d.dir, "sort")); string(b) != "recent\n" {
+		t.Errorf("saved %q", b)
 	}
 	l, err := d.cache.get("albums", nil)
-	if err != nil || len(l.lists) != 4 || l.lists[0].Ctx != "album:l.a1" || l.lists[1].Ctx != "album:l.a2" {
+	if err != nil || len(l.lists) != 5 || l.lists[0].Ctx != "album:l.a1" || l.lists[1].Ctx != "album:l.a5" {
 		t.Errorf("Download All's order %+v %v", l.lists, err)
 	}
 	if !newer("2026-11-04T09:00:00Z", "2025-02-09T05:15:17Z") || newer("", "2025-02-09T05:15:17Z") || !newer("2025-02-09T05:15:17Z", "") || newer("", "") {
 		t.Error("newer")
+	}
+	// The default with no file, or one it doesn't know: the last added first.
+	for _, v := range []string{"", "sideways"} {
+		dir := t.TempDir()
+		if v != "" {
+			os.WriteFile(filepath.Join(dir, "sort"), []byte(v+"\n"), 0o644)
+		}
+		if got := readSort(dir); got != "recent" {
+			t.Errorf("sort file %q read as %q", v, got)
+		}
 	}
 }

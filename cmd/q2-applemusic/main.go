@@ -32,7 +32,7 @@ import (
 	"github.com/group-a-study/q2-applemusic/internal/widevine"
 )
 
-const version = "q2-v1.10"
+const version = "q2-v1.11"
 
 // transport carries every request to Apple: TLS checked against the add-on's own roots, as the
 // firmware has none. Tests answer for Apple instead.
@@ -71,6 +71,7 @@ type daemon struct {
 	auth int
 	org  bool      // Organize Files: Artist/Year - Album folders
 	strm bool      // Stream mode: a press plays a song, not downloads it
+	sort string    // Sort: the Albums and Playlists pages' order (sorting.go)
 	used time.Time // the Q2's page, last
 	quit chan struct{}
 	once sync.Once
@@ -116,6 +117,7 @@ func start(dir, folder, statusFile, browse, control string) *daemon {
 	}
 	d.org = readOrganize(dir)
 	d.strm = readMode(dir)
+	d.sort = readSort(dir)
 	d.dl = newDownloads(d, folder, filepath.Join(dir, "queue.json"), filepath.Join(dir, "bulk.json"))
 	base := strings.TrimSuffix(statusFile, ".state") // Q2 Pod's names: /tmp/q2-applemusic.play, .playing
 	d.st = newStreamer(d, filepath.Join(dir, "stream"), base+".play", base+".playing")

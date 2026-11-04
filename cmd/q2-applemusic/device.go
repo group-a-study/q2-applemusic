@@ -72,6 +72,15 @@ func (c *cache) clear() {
 	c.mu.Unlock()
 }
 
+// drop forgets keys' listings, so they are fetched again; a fetch under way ends unkept.
+func (c *cache) drop(keys ...string) {
+	c.mu.Lock()
+	for _, k := range keys {
+		delete(c.m, k)
+	}
+	c.mu.Unlock()
+}
+
 // get is key's listing: a kept one younger than keepFor; else fetch's, waited for at most answerIn
 // (errLoading after, the fetch carrying on); else, while fetch runs again, the one kept.
 func (c *cache) get(key string, fetch func() (listing, error)) (listing, error) {
@@ -261,7 +270,7 @@ func (d *daemon) answer(req q2spot.Request) q2spot.Reply {
 		var rows []q2spot.Row
 		for _, op := range []string{"caps", "menu", "recent", "playlists", "albums", "artists", "artist", "tracks",
 			"search", "found", "downloads", "account", "download", "bulk", "bulkstop", "cancel", "cancelall", "retry",
-			"clearfailed", "organize", "mode", "stream", "cardartists", "cardalbums", "signout", "stop"} {
+			"clearfailed", "organize", "mode", "sort", "stream", "cardartists", "cardalbums", "signout", "stop"} {
 			rows = append(rows, q2spot.Row{Kind: "op", URI: op})
 		}
 		return q2spot.Reply{Message: version, Rows: rows}
@@ -304,6 +313,12 @@ func (d *daemon) answer(req q2spot.Request) q2spot.Reply {
 			return ok("A press plays the song; nothing is kept")
 		}
 		return ok("A press downloads the song")
+	case "sort":
+		i, err := d.nextSort()
+		if err != nil {
+			return q2spot.Fail(q2spot.Error, "Couldn't save the setting")
+		}
+		return ok("Albums and Playlists: " + sorts[i].done)
 	case "cardartists": // Apple Music/ or its 48khz/
 		if req.Arg(0) == hiresDir {
 			return d.cardArtists(hiresDir, cursor(req, 1))
@@ -694,10 +709,10 @@ func (d *daemon) download(am *apple.Client, arg string) q2spot.Reply {
 }
 
 // playlistsListing is the Playlists page: Top Charts, Download All, then the library's playlists,
-// the last added first.
+// in Sort's order (sorting.go).
 func (d *daemon) playlistsListing(ctx context.Context, am *apple.Client) (listing, error) {
 	ps, err := am.LibraryPlaylists(ctx)
-	sort.SliceStable(ps, func(i, j int) bool { return newer(ps[i].Added, ps[j].Added) })
+	sortPlaylists(ps, d.sortBy())
 	l := listing{rows: []q2spot.Row{open("chart", "Top Charts", "Apple Music's most played")}}
 	for _, p := range ps {
 		l.lists = append(l.lists, bulkList{Ctx: "playlist:" + p.ID, Name: p.Name, Changed: p.Changed})
@@ -712,11 +727,11 @@ func (d *daemon) playlistsListing(ctx context.Context, am *apple.Client) (listin
 	return l, err
 }
 
-// albumsListing is the Albums page: Download All, then the library's albums, the last added first
-// (Download All goes in that order too).
+// albumsListing is the Albums page: Download All, then the library's albums, in Sort's order
+// (sorting.go), which Download All goes in too.
 func (d *daemon) albumsListing(ctx context.Context, am *apple.Client) (listing, error) {
 	as, err := am.LibraryAlbums(ctx)
-	sort.SliceStable(as, func(i, j int) bool { return newer(as[i].Added, as[j].Added) })
+	sortAlbums(as, d.sortBy())
 	var l listing
 	for _, a := range as {
 		l.lists = append(l.lists, bulkList{Ctx: "album:" + a.ID, Name: a.Name, Artist: a.Artist, Songs: a.Songs})
@@ -731,20 +746,6 @@ func (d *daemon) albumsListing(ctx context.Context, am *apple.Client) (listing, 
 		l.rows = append(l.rows, albumRow(a))
 	}
 	return l, err
-}
-
-// newer is whether date a (a listing's dateAdded) is later than b; an undated one is the oldest, and
-// Apple's order (by name) stays among equals.
-func newer(a, b string) bool {
-	ta, ea := time.Parse(time.RFC3339, a)
-	tb, eb := time.Parse(time.RFC3339, b)
-	switch {
-	case ea != nil:
-		return false
-	case eb != nil:
-		return true
-	}
-	return ta.After(tb)
 }
 
 // bulk is Download All for the library's albums or playlists: each queued in turn (downloads.go
@@ -939,6 +940,8 @@ func (d *daemon) menu() q2spot.Reply {
 	if d.streaming() {
 		mode.Title, mode.Subtitle = "Mode: Stream", "A press plays the song; nothing is kept"
 	}
+	by := sorts[sortIndex(d.sortBy())]
+	sortRow := q2spot.Row{Kind: "action", URI: "sort", Title: "Sort: " + by.title, Subtitle: by.sub}
 	stop := q2spot.Row{Kind: "action", URI: "stop", Title: "Stop Apple Music", Subtitle: "Downloads carry on next time"}
 	queue := d.queueRow()
 	var rows []q2spot.Row
@@ -973,6 +976,7 @@ func (d *daemon) menu() q2spot.Reply {
 			queue,
 			mode,
 			org,
+			sortRow,
 			{Kind: "list", URI: "account", Title: "Account"},
 		}
 		return q2spot.Reply{Message: "refresh", Rows: append(append([]q2spot.Row{songs}, rows...), stop)}

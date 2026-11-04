@@ -69,9 +69,11 @@ it leaves.
       the sign-in page: /?k=KEY signs a browser in (the key is the QR code's, new each start),
       POST /api/login takes the PIN, POST /api/token checks and saves a media-user-token (the value,
       a Cookie header or a cookies.txt), POST /api/signout removes it; posts need the header X-Q2: 1
-  .applemusic/media-user-token, .applemusic/organize, .applemusic/mode, .applemusic/queue.json,
+  .applemusic/media-user-token, .applemusic/organize, .applemusic/mode, .applemusic/sort,
+  .applemusic/queue.json,
   .applemusic/bulk.json, .applemusic/lists.json, .applemusic/failed.json
-      the sign-in, Organize Files (on, off), Mode (download, stream), the songs waiting, Download
+      the sign-in, Organize Files (on, off), Mode (download, stream), Sort (recent, name, artist,
+      released), the songs waiting, Download
       All's lists to go and those it waits on the songs of, and the songs that failed; updates keep
       them
   Apple Music/Not Downloaded.txt
@@ -116,7 +118,7 @@ order), info does nothing. A row's position is the op Play/Pause held sends.
   recent, playlists, albums, artists
       list rows: tracks <list> (Play/Pause held: download <list>), or artist <id>; playlists and
       albums start with Download All Playlists / Download All Albums (bulk playlists|albums), then
-      list the library's by its dateAdded, the last added first (undated last, by name)
+      list the library's in Sort's order (sort, below)
   artist <id>
       a library artist's (r.…) albums in the library; a catalogue artist's Top Songs, then its
       albums, singles and EPs
@@ -139,9 +141,12 @@ order), info does nothing. A row's position is the op Play/Pause held sends.
       (Unsorted Songs), then each artist's folder, Playlists among them, then 48 kHz and Higher
       (cardartists 48khz, its artists as cardalbums 48khz/<artist>); an artist's albums, oldest
       first, each a local folder row with context album
-  mode, organize, account, signout, stop
-      Mode download or stream; Organize Files on or off; the account (subscription, country) and
-      Sign Out; the token removed; the app stopped
+  mode, organize, sort, account, signout, stop
+      Mode download or stream; Organize Files on or off; Sort's next order (Recently Added, the
+      default, by dateAdded, the last added first; Name, A to Z with a leading "The" aside; Artist,
+      albums by artist, then year, then name; Release Date, albums the newest first; playlists A to
+      Z for those two), the Albums and Playlists pages fetched again in it; the account
+      (subscription, country) and Sign Out; the token removed; the app stopped
 
 Lists of songs are named songs (the library's), chart, album:<id> (l.… a library album, its songs
 in the library; else the catalogue's), playlist:<id> (p.… a library playlist; pl.… the
