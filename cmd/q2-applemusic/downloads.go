@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/group-a-study/q2-applemusic/internal/apple"
@@ -110,7 +111,9 @@ type downloads struct {
 	have      map[string]string // key: its file
 	ids       map[string]string // song id: a file of it, any
 	scanned   time.Time
-	stalled   string // why the queue doesn't move now; "" when it does
+	read      chan struct{} // closed once the card was first read (firstScan)
+	scanning  atomic.Bool   // a read of the card under way
+	stalled   string        // why the queue doesn't move now; "" when it does
 	wake      chan struct{}
 	saveTimer *time.Timer
 	bulk      bulkJob
@@ -118,7 +121,7 @@ type downloads struct {
 }
 
 func newDownloads(d *daemon, folder, file, bulkFile string) *downloads {
-	dl := &downloads{d: d, folder: folder, file: file, bulkFile: bulkFile, wake: make(chan struct{}, 1),
+	dl := &downloads{d: d, folder: folder, file: file, bulkFile: bulkFile, wake: make(chan struct{}, 1), read: make(chan struct{}),
 		failedFile: filepath.Join(filepath.Dir(file), "failed.json"), have: map[string]string{}, ids: map[string]string{}}
 	var kept []*item
 	if b, err := os.ReadFile(file); err == nil {
@@ -141,8 +144,6 @@ func newDownloads(d *daemon, folder, file, bulkFile string) *downloads {
 			dl.failed = append(dl.failed, it)
 		}
 	}
-	dl.sweep()
-	dl.rescan()
 	return dl
 }
 
@@ -160,16 +161,6 @@ func (dl *downloads) walk(fn func(path, name string)) {
 			fn(p, de.Name())
 		}
 		return nil
-	})
-}
-
-// sweep deletes the temp files an interrupted download left (q2-applemusic stopped or killed
-// under way); nothing downloads yet, so none is in use.
-func (dl *downloads) sweep() {
-	dl.walk(func(path, name string) {
-		if leftover.MatchString(name) {
-			os.Remove(path)
-		}
 	})
 }
 
@@ -193,11 +184,44 @@ func readMarker(dir string) (id, name string) {
 	return id, name
 }
 
-// rescan reads the folder for the songs already downloaded.
-func (dl *downloads) rescan() {
+// scanHook runs before the first read of the card; tests hold it.
+var scanHook = func() {}
+
+// firstScan is the start's read of the card, after the page's socket is up: Q2 Pod gives a starting
+// app ten seconds to answer, and a card of thousands of songs can take longer than that to read. It
+// also deletes the temp files an interrupted download left (nothing downloads until it is done, so
+// none is in use; a song's is megabytes). Downloads start once it is done.
+func (dl *downloads) firstScan() {
+	dl.scanning.Store(true)
+	scanHook()
+	dl.scan(true)
+	dl.scanning.Store(false)
+	close(dl.read)
+}
+
+// scanned is whether the card has been read since the start.
+func (dl *downloads) scannedYet() bool {
+	select {
+	case <-dl.read:
+		return true
+	default:
+		return false
+	}
+}
+
+// rescan reads the folder again for the songs on the card.
+func (dl *downloads) rescan() { dl.scan(false) }
+
+// scan reads the folder, and the folders under it, for the songs downloaded (their ids, a playlist
+// album's by its marker), in one pass; sweep also deletes temp files left behind.
+func (dl *downloads) scan(sweep bool) {
 	have, ids := map[string]string{}, map[string]string{}
 	lists := map[string]string{} // folder: its playlist
 	dl.walk(func(path, name string) {
+		if sweep && leftover.MatchString(name) {
+			os.Remove(path)
+			return
+		}
 		m := named.FindStringSubmatch(name)
 		if m == nil {
 			return
@@ -229,13 +253,17 @@ func (dl *downloads) order(dir string) string {
 	return ""
 }
 
-// fresh rescans the folder when the last scan is a minute old (files deleted or added by hand).
+// fresh reads the folder again, in the background, when the last read is a minute old (files
+// deleted or added by hand): a page's request never waits for it.
 func (dl *downloads) fresh() {
 	dl.mu.Lock()
 	old := time.Since(dl.scanned) > time.Minute
 	dl.mu.Unlock()
-	if old {
-		dl.rescan()
+	if old && dl.scannedYet() && dl.scanning.CompareAndSwap(false, true) {
+		go func() {
+			dl.scan(false)
+			dl.scanning.Store(false)
+		}()
 	}
 }
 
@@ -570,6 +598,11 @@ func (dl *downloads) stall(it *item, why string) {
 // run downloads the waiting songs one after another, then Download All's next list's, until ctx
 // ends (the add-on stopping, which leaves the one downloading for next time).
 func (dl *downloads) run(ctx context.Context) {
+	select {
+	case <-dl.read:
+	case <-ctx.Done():
+		return
+	}
 	for {
 		dl.mu.Lock()
 		stalled := dl.stalled != ""
@@ -693,6 +726,12 @@ func (dl *downloads) next(ctx context.Context) bool {
 	}
 	it := dl.waiting[0]
 	dl.waiting = dl.waiting[1:]
+	if p, on := dl.have[key(it.Track)]; on { // queued before the card was read: it is there
+		it.Path = p
+		dl.mu.Unlock()
+		dl.save()
+		return true
+	}
 	dl.cur, dl.dropped = it, false
 	one, cancel := context.WithCancel(ctx)
 	dl.cancel = cancel

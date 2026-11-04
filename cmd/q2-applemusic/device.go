@@ -856,6 +856,9 @@ func (d *daemon) menu() q2spot.Reply {
 	d.dl.fresh()
 	have := d.dl.count()
 	songs := q2spot.Row{Kind: "local", URI: d.dl.folder + "/", Title: "Downloaded Songs", Subtitle: plural(have, "song") + " on the card"}
+	if !d.dl.scannedYet() {
+		songs.Subtitle = "Reading the card…"
+	}
 	if _, dirs := songsIn(d.dl.folder); len(dirs) > 0 { // Artist/Album folders: browsed by them
 		songs.Kind, songs.URI = "list", "cardartists"
 	}

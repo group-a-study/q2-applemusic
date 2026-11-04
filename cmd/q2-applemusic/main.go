@@ -32,7 +32,7 @@ import (
 	"github.com/group-a-study/q2-applemusic/internal/widevine"
 )
 
-const version = "q2-v1.4"
+const version = "q2-v1.5"
 
 // transport carries every request to Apple: TLS checked against the add-on's own roots, as the
 // firmware has none. Tests answer for Apple instead.
@@ -126,6 +126,7 @@ func start(dir, folder, statusFile, browse, control string) *daemon {
 		}
 	})
 	go q2spot.Serve(browse, d.device, d.quit)
+	go d.dl.firstScan() // after the socket: the card can take longer to read than Q2 Pod waits
 	return d
 }
 

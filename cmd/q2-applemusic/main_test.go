@@ -229,6 +229,12 @@ func newFakeApple(t *testing.T) *fakeApple {
 // rig is a daemon on a card in a temp folder, signed in, talking to f.
 func rig(t *testing.T, f *fakeApple) *daemon {
 	t.Helper()
+	return rigWith(t, f, nil)
+}
+
+// rigWith is rig with the card readied by before (given its mount point) first.
+func rigWith(t *testing.T, f *fakeApple, before func(card string)) *daemon {
+	t.Helper()
 	apple.HomeURL, apple.AMPURL, apple.PlayURL = f.URL, f.URL, f.URL
 	transport = func() http.RoundTripper { return http.DefaultTransport }
 	cardReady = func() bool { return true }
@@ -239,6 +245,9 @@ func rig(t *testing.T, f *fakeApple) *daemon {
 	dir := filepath.Join(card, ".applemusic")
 	os.MkdirAll(dir, 0o755)
 	os.WriteFile(filepath.Join(dir, tokenFile), []byte(f.token+"\n"), 0o600)
+	if before != nil {
+		before(card)
+	}
 	tmp := t.TempDir()
 	d := start(dir, filepath.Join(card, "Apple Music"), filepath.Join(tmp, "q2-applemusic.state"),
 		filepath.Join(tmp, "browse.sock"), filepath.Join(tmp, "ctl.sock"))
@@ -635,5 +644,46 @@ func TestCookiesFile(t *testing.T) {
 	}
 	if cookieToken([]byte("media-user-token="+f.token)) != f.token || cookieToken([]byte(line("0.short"))) != "" {
 		t.Fatal("cookieToken")
+	}
+}
+
+// TestStartsBeforeTheCardIsRead: the page answers while the card is still being read (a card of
+// thousands of songs takes longer than the ten seconds Q2 Pod gives a starting app), and nothing
+// downloads until it is read, so a song already there isn't fetched again.
+func TestStartsBeforeTheCardIsRead(t *testing.T) {
+	f := newFakeApple(t)
+	hold := make(chan struct{})
+	scanHook = func() { <-hold }
+	defer func() { scanHook = func() {} }()
+	d := rigWith(t, f, func(card string) {
+		dir := filepath.Join(card, "Apple Music", "Broadcast", "2005 - Tender Buttons")
+		os.MkdirAll(dir, 0o755)
+		os.WriteFile(filepath.Join(dir, "02 - Valerie [102].m4a"), []byte("on the card"), 0o644)
+		os.WriteFile(filepath.Join(dir, "01 - Tears in the Typing Pool [101].m4a.part"), []byte("left"), 0o644)
+	})
+	if got := ask(d, "menu"); got.Rows[0].Subtitle != "Reading the card…" {
+		t.Fatalf("menu while reading: %+v", got.Rows[0])
+	}
+	ask(d, "tracks", "album:l.a1")
+	if r := ask(d, "download", "album:l.a1"); r.Message != "Downloading 2 songs" {
+		t.Fatalf("download: %+v", r)
+	}
+	time.Sleep(200 * time.Millisecond)
+	f.mu.Lock()
+	early := len(f.plays)
+	f.mu.Unlock()
+	if early != 0 {
+		t.Fatal("downloads started before the card was read")
+	}
+	close(hold)
+	until(t, "the queue", func() bool { return d.dl.scannedYet() && !d.dl.pending() })
+	f.mu.Lock()
+	plays := fmt.Sprint(f.plays)
+	f.mu.Unlock()
+	if plays != "map[101:1]" {
+		t.Fatalf("playback asked %s: Valerie was on the card", plays)
+	}
+	if _, err := os.Stat(filepath.Join(d.dl.folder, "Broadcast", "2005 - Tender Buttons", "01 - Tears in the Typing Pool [101].m4a.part")); !os.IsNotExist(err) {
+		t.Fatal("the leftover .part wasn't swept")
 	}
 }

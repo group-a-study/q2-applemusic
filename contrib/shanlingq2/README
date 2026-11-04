@@ -211,9 +211,14 @@ tracks or more, so a folder's names sort in track order. Names are cut to 180 by
 dot or space) are replaced. Off: every song in Apple Music/ itself as "Title - Artist [id].m4a".
 
 Either way the [id] at the end of a name is how q2-applemusic knows a song is on the card: it reads
-Apple Music/ and the folders under it (hidden ones skipped) at its start, and again when the page
-asks for a list a minute or more after the last read, so songs moved by hand within Apple Music/
-are found.
+Apple Music/ and the folders under it (hidden ones skipped) at its start, and again, in the
+background, when the page asks for a list a minute or more after the last read, so songs moved by
+hand within Apple Music/ are found. The start's read comes after the page's socket is up, in one
+pass that also sweeps temp files left behind: Q2 Pod gives a starting app 10 s to answer
+(ADDON_START_MS) and stops it after, and a card of thousands of songs, read cold after a boot, took
+longer than that (v1.4 and before read it twice first, so a full card could never start). Until
+the read is done, Downloaded Songs says "Reading the card…" and nothing downloads; a song queued
+meanwhile that turns out to be on the card is skipped.
 
 The song under way is counted in queue.json before it starts and the count taken back when it
 returns, so only a death of q2-applemusic under way (killed, out of memory, a crash) leaves it
