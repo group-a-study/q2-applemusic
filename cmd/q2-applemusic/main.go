@@ -32,7 +32,7 @@ import (
 	"github.com/group-a-study/q2-applemusic/internal/widevine"
 )
 
-const version = "q2-v1.5"
+const version = "q2-v1.6"
 
 // transport carries every request to Apple: TLS checked against the add-on's own roots, as the
 // firmware has none. Tests answer for Apple instead.
@@ -94,10 +94,11 @@ func main() {
 	debug.SetGCPercent(50)
 	debug.SetMemoryLimit(40 << 20)
 	q2.Card = *card
+	logPath = filepath.Join(*card, "q2-applemusic.log")
 	d := start(*dir, filepath.Join(*card, "Apple Music"), *statusFile, *browse, *control)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	go func() { <-sig; d.shutdown() }()
+	go func() { s := <-sig; logf("signal %v: stopping", s); d.shutdown() }()
 	d.run()
 	os.Exit(0)
 }
@@ -122,10 +123,13 @@ func start(dir, folder, statusFile, browse, control string) *daemon {
 	go func() { d.lookForCookies(); d.checkAuth() }()
 	q2.Control(control, func(cmd []byte) {
 		if len(cmd) > 0 && cmd[0] == 'q' {
+			logf("Q2 Pod asked it to quit: stopping")
 			d.shutdown()
 		}
 	})
 	go q2spot.Serve(browse, d.device, d.quit)
+	logStart(d)
+	logf("page socket served %d ms after the start", time.Since(started).Milliseconds())
 	go d.dl.firstScan() // after the socket: the card can take longer to read than Q2 Pod waits
 	return d
 }
@@ -147,6 +151,7 @@ func (d *daemon) run() {
 			d.state.Remove()
 			os.Remove(d.browse)
 			os.Remove(d.control)
+			logf("stopped")
 			return
 		case <-t.C:
 			d.writeState()
@@ -160,7 +165,11 @@ func (d *daemon) run() {
 			idle := time.Since(d.used)
 			d.mu.Unlock()
 			if !d.dl.pending() && !d.st.active() && idle > idleFor {
+				logf("nothing to download and the page unused for %v: stopping", idleFor)
 				d.shutdown()
+			}
+			if n%60 == 0 {
+				logMemory(d)
 			}
 		}
 	}
@@ -237,6 +246,7 @@ func (d *daemon) setAuth(a int) {
 	d.auth = a
 	d.mu.Unlock()
 	if changed {
+		logf("sign-in: %s", authNames[a])
 		d.writeState()
 		if a == authOK {
 			d.dl.poke()

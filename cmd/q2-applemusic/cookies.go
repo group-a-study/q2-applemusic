@@ -109,6 +109,7 @@ func (d *daemon) importCookies() {
 					continue
 				}
 				os.Remove(path)
+				logf("signed in from %s (deleted)", path)
 				d.mu.Lock()
 				delete(d.cookies, path)
 				d.cookieNote = ""
@@ -117,6 +118,7 @@ func (d *daemon) importCookies() {
 				return
 			}
 		}
+		logf("cookies file %s: %s", path, note)
 		d.mu.Lock()
 		d.cookies[path] = seen
 		d.cookieNote = note

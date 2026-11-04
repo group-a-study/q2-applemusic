@@ -194,7 +194,12 @@ var scanHook = func() {}
 func (dl *downloads) firstScan() {
 	dl.scanning.Store(true)
 	scanHook()
+	t := time.Now()
 	dl.scan(true)
+	dl.mu.Lock()
+	n := len(dl.have)
+	dl.mu.Unlock()
+	logf("card read: %d songs in %d ms", n, time.Since(t).Milliseconds())
 	dl.scanning.Store(false)
 	close(dl.read)
 }
@@ -407,6 +412,7 @@ func (dl *downloads) clearFailed() {
 
 // fail moves the song under way to the failed ones, noted in Not Downloaded.txt.
 func (dl *downloads) fail(it *item, why string, am *apple.Client) {
+	logf("gave up on %s %q: %s", it.Track.ID, it.Track.Name, why)
 	it.Err, it.At, it.Tries, it.Attempt = why, time.Now().Format("2006-01-02 15:04"), 0, 0
 	sf := "us"
 	if a := am.Known(); a != nil {
@@ -587,6 +593,9 @@ func (dl *downloads) bulkState() (left, total int, now string) {
 // stall puts it back first in the queue: the queue waits (why), then tries again.
 func (dl *downloads) stall(it *item, why string) {
 	dl.mu.Lock()
+	if why != dl.stalled && why != "" {
+		logf("queue waits: %s", why)
+	}
 	dl.cur, dl.cancel = nil, nil
 	if it != nil {
 		dl.waiting = append([]*item{it}, dl.waiting...)
@@ -704,7 +713,11 @@ func (dl *downloads) expand(ctx context.Context) bool {
 	}
 	dl.mu.Unlock()
 	dl.saveBulk()
-	dl.add(ts)
+	n := dl.add(ts)
+	dl.mu.Lock()
+	left := len(dl.bulk.Lists)
+	dl.mu.Unlock()
+	logf("Download All: %q: %d of its %d songs queued (%v); %d lists to go", l.Name, n, len(ts), err, left)
 	dl.pause(ctx)
 	return true
 }
@@ -760,8 +773,14 @@ func (dl *downloads) next(ctx context.Context) bool {
 		dl.mu.Lock()
 		it.Attempt = try + 1
 		dl.mu.Unlock()
-		if path, err = dl.d.fetchSong(one, am, it.Track, dl.place); err == nil || try == songRetries ||
-			one.Err() != nil || dl.why(err) != "" {
+		t := time.Now()
+		logf("download %s %q by %s: try %d", it.Track.ID, it.Track.Name, it.Track.Artist, try+1)
+		if path, err = dl.d.fetchSong(one, am, it.Track, dl.place); err == nil {
+			logf("saved %s in %.1f s", path, time.Since(t).Seconds())
+		} else {
+			logf("download %s failed after %.1f s: %v", it.Track.ID, time.Since(t).Seconds(), err)
+		}
+		if err == nil || try == songRetries || one.Err() != nil || dl.why(err) != "" {
 			break
 		}
 		select {

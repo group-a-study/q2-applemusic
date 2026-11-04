@@ -230,7 +230,17 @@ func fail(err error) q2spot.Reply {
 	return q2spot.Fail(q2spot.Error, "Apple Music didn't answer")
 }
 
+// device answers the Q2's page; a slow answer (the Q2 waits 15 s) is logged.
 func (d *daemon) device(req q2spot.Request) q2spot.Reply {
+	t := time.Now()
+	r := d.answer(req)
+	if el := time.Since(t); el > 3*time.Second {
+		logf("page: %s %q took %.1f s (%s %s)", req.Op, req.Args, el.Seconds(), r.Status, r.Message)
+	}
+	return r
+}
+
+func (d *daemon) answer(req q2spot.Request) q2spot.Reply {
 	d.touch()
 	ok := func(msg string) q2spot.Reply { return q2spot.Reply{Message: msg} }
 	switch req.Op {
@@ -294,6 +304,7 @@ func (d *daemon) device(req q2spot.Request) q2spot.Reply {
 		}
 		return ok("Signed out; your downloads stay")
 	case "stop":
+		logf("Stop Apple Music pressed: stopping")
 		go func() { time.Sleep(300 * time.Millisecond); d.shutdown() }() // the reply first
 		return ok("Apple Music stopped")
 	}
